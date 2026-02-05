@@ -453,6 +453,7 @@
                 <div class="log-header">
                     <h3>Communication Log</h3>
                     <div class="log-controls">
+                        <button class="clear-btn" onclick="exportLogs('read')">Export CSV</button>
                         <button class="clear-btn" onclick="clearReadLogs()">Clear</button>
                         <span class="log-count" id="readLogCount">0 entries</span>
                     </div>
@@ -502,6 +503,7 @@
                             <input type="checkbox" id="autoScroll" checked>
                             Auto-scroll
                         </label>
+                        <button class="clear-btn" onclick="exportLogs('emulate')">Export CSV</button>
                         <button class="clear-btn" onclick="clearLogs()">Clear</button>
                         <span class="log-count" id="emulateLogCount">0 entries</span>
                     </div>
@@ -732,6 +734,38 @@
             document.getElementById('readLogContent').innerHTML =
                 '<div class="log-empty">Logs cleared</div>';
             document.getElementById('readLogCount').textContent = '0 entries';
+        }
+
+        function exportLogs(type) {
+            const containerId = type === 'read' ? 'readLogContent' : 'emulateLogContent';
+            const container = document.getElementById(containerId);
+            const entries = container.querySelectorAll('.log-entry');
+
+            if (entries.length === 0) {
+                alert('No logs to export');
+                return;
+            }
+
+            // Build CSV content
+            let csv = 'Time,Direction,Data\n';
+            entries.forEach(entry => {
+                const time = entry.querySelector('.log-time')?.textContent || '';
+                const direction = entry.querySelector('.log-direction')?.textContent || '';
+                const data = entry.querySelector('.log-data')?.textContent || '';
+                // Escape quotes in data
+                const escapedData = data.replace(/"/g, '""');
+                csv += `"${time}","${direction}","${escapedData}"\n`;
+            });
+
+            // Download file
+            const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+            const url = URL.createObjectURL(blob);
+            const link = document.createElement('a');
+            const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+            link.href = url;
+            link.download = `nfc-log-${type}-${timestamp}.csv`;
+            link.click();
+            URL.revokeObjectURL(url);
         }
 
         async function toggleEmulation() {
