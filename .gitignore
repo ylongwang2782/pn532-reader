@@ -26,3 +26,7 @@ instance/
 # Environment variables
 .env
 .env.local
+
+# Runtime files
+.pid
+server.log
