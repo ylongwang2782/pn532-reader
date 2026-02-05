@@ -8,14 +8,21 @@ import re
 import os
 import signal
 import tempfile
+import threading
+import time
+from collections import deque
+from datetime import datetime
 import ndef
 from flask import Flask, render_template, jsonify, request
 
 app = Flask(__name__)
 
-# Store emulation process
+# Store emulation process and logs
 emulation_process = None
 ndef_file_path = None
+log_buffer = deque(maxlen=500)
+log_lock = threading.Lock()
+log_reader_thread = None
 
 
 def parse_nfc_list_output(output: str) -> list[dict]:
@@ -25,13 +32,11 @@ def parse_nfc_list_output(output: str) -> list[dict]:
     device_name = None
 
     for line in output.split('\n'):
-        # Extract device name
         if 'NFC device:' in line and 'opened' in line:
             match = re.search(r'NFC device: (.+?) opened', line)
             if match:
                 device_name = match.group(1)
 
-        # Start of a new target
         if 'ISO/IEC 14443A' in line or 'ISO/IEC 14443B' in line:
             if current_card:
                 cards.append(current_card)
@@ -44,7 +49,6 @@ def parse_nfc_list_output(output: str) -> list[dict]:
                 'ats': None
             }
 
-        # Extract card details
         if current_card:
             if 'ATQA' in line:
                 match = re.search(r':\s*(.+)', line)
@@ -66,7 +70,6 @@ def parse_nfc_list_output(output: str) -> list[dict]:
     if current_card:
         cards.append(current_card)
 
-    # Remove duplicates (same UID from different devices)
     seen_uids = set()
     unique_cards = []
     for card in cards:
@@ -77,35 +80,96 @@ def parse_nfc_list_output(output: str) -> list[dict]:
     return unique_cards
 
 
+def parse_log_line(line: str) -> dict | None:
+    """Parse a libnfc debug log line and extract TX/RX data."""
+    timestamp = datetime.now().strftime('%H:%M:%S.%f')[:-3]
+
+    # Match TX/RX patterns
+    tx_match = re.search(r'TX:\s*(.+)', line)
+    rx_match = re.search(r'RX:\s*(.+)', line)
+
+    if tx_match:
+        return {
+            'time': timestamp,
+            'direction': 'TX',
+            'data': tx_match.group(1).strip(),
+            'raw': line.strip()
+        }
+    elif rx_match:
+        return {
+            'time': timestamp,
+            'direction': 'RX',
+            'data': rx_match.group(1).strip(),
+            'raw': line.strip()
+        }
+
+    return None
+
+
+def log_reader(process):
+    """Read logs from process stderr in a separate thread."""
+    global log_buffer
+
+    try:
+        for line in iter(process.stderr.readline, b''):
+            if not line:
+                break
+            try:
+                decoded = line.decode('utf-8', errors='replace').strip()
+                if decoded:
+                    parsed = parse_log_line(decoded)
+                    if parsed:
+                        with log_lock:
+                            log_buffer.append(parsed)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
 def run_nfc_list() -> dict:
     """Run nfc-list command and return parsed results."""
     try:
+        env = os.environ.copy()
+        env['LIBNFC_LOG_LEVEL'] = '3'
+
         result = subprocess.run(
             ['nfc-list'],
             capture_output=True,
             text=True,
-            timeout=10
+            timeout=10,
+            env=env
         )
 
         output = result.stdout + result.stderr
         cards = parse_nfc_list_output(output)
 
+        # Parse logs from output
+        logs = []
+        for line in output.split('\n'):
+            parsed = parse_log_line(line)
+            if parsed:
+                logs.append(parsed)
+
         return {
             'success': True,
             'cards': cards,
-            'raw_output': output
+            'raw_output': output,
+            'logs': logs
         }
     except subprocess.TimeoutExpired:
         return {
             'success': False,
             'error': 'Command timed out',
-            'cards': []
+            'cards': [],
+            'logs': []
         }
     except Exception as e:
         return {
             'success': False,
             'error': str(e),
-            'cards': []
+            'cards': [],
+            'logs': []
         }
 
 
@@ -118,7 +182,6 @@ def create_ndef_file(ndef_type: str, content: str) -> str:
     else:
         raise ValueError(f"Unknown NDEF type: {ndef_type}")
 
-    # Create temp file
     fd, path = tempfile.mkstemp(suffix='.ndef')
     with os.fdopen(fd, 'wb') as f:
         f.write(b''.join(ndef.message_encoder([record])))
@@ -142,9 +205,8 @@ def scan():
 @app.route('/api/emulate/start', methods=['POST'])
 def emulate_start():
     """Start Type 4 tag emulation."""
-    global emulation_process, ndef_file_path
+    global emulation_process, ndef_file_path, log_buffer, log_reader_thread
 
-    # Check if already emulating
     if emulation_process and emulation_process.poll() is None:
         return jsonify({
             'success': False,
@@ -162,16 +224,31 @@ def emulate_start():
         })
 
     try:
-        # Create NDEF file
         ndef_file_path = create_ndef_file(ndef_type, content)
 
-        # Start emulation
+        # Clear log buffer
+        with log_lock:
+            log_buffer.clear()
+
+        # Set environment for debug logging
+        env = os.environ.copy()
+        env['LIBNFC_LOG_LEVEL'] = '3'
+
         emulation_process = subprocess.Popen(
             ['nfc-emulate-forum-tag4', ndef_file_path],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            env=env,
             preexec_fn=os.setsid
         )
+
+        # Start log reader thread
+        log_reader_thread = threading.Thread(
+            target=log_reader,
+            args=(emulation_process,),
+            daemon=True
+        )
+        log_reader_thread.start()
 
         return jsonify({
             'success': True,
@@ -198,7 +275,6 @@ def emulate_stop():
         })
 
     try:
-        # Kill process group
         os.killpg(os.getpgid(emulation_process.pid), signal.SIGTERM)
         emulation_process.wait(timeout=5)
     except Exception:
@@ -209,7 +285,6 @@ def emulate_stop():
 
     emulation_process = None
 
-    # Clean up NDEF file
     if ndef_file_path and os.path.exists(ndef_file_path):
         os.remove(ndef_file_path)
         ndef_file_path = None
@@ -234,6 +309,37 @@ def emulate_status():
     return jsonify({
         'running': False
     })
+
+
+@app.route('/api/logs')
+def get_logs():
+    """Get communication logs."""
+    global log_buffer
+
+    since_index = request.args.get('since', 0, type=int)
+
+    with log_lock:
+        logs = list(log_buffer)
+
+    # Return logs after the specified index
+    if since_index > 0 and since_index < len(logs):
+        logs = logs[since_index:]
+
+    return jsonify({
+        'logs': logs,
+        'total': len(log_buffer)
+    })
+
+
+@app.route('/api/logs/clear', methods=['POST'])
+def clear_logs():
+    """Clear communication logs."""
+    global log_buffer
+
+    with log_lock:
+        log_buffer.clear()
+
+    return jsonify({'success': True})
 
 
 if __name__ == '__main__':
