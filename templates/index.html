@@ -1,0 +1,319 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PN532 NFC Reader</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            min-height: 100vh;
+            color: #fff;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+        }
+
+        h1 {
+            text-align: center;
+            margin-bottom: 30px;
+            font-size: 2rem;
+            color: #00d9ff;
+        }
+
+        .scan-btn {
+            display: block;
+            width: 200px;
+            margin: 0 auto 30px;
+            padding: 15px 30px;
+            font-size: 1.2rem;
+            font-weight: bold;
+            color: #fff;
+            background: linear-gradient(135deg, #00d9ff 0%, #0077b6 100%);
+            border: none;
+            border-radius: 50px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            box-shadow: 0 4px 15px rgba(0, 217, 255, 0.3);
+        }
+
+        .scan-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(0, 217, 255, 0.4);
+        }
+
+        .scan-btn:active {
+            transform: translateY(0);
+        }
+
+        .scan-btn:disabled {
+            background: #555;
+            cursor: not-allowed;
+            box-shadow: none;
+        }
+
+        .status {
+            text-align: center;
+            margin-bottom: 20px;
+            font-size: 1rem;
+            color: #aaa;
+        }
+
+        .status.scanning {
+            color: #00d9ff;
+        }
+
+        .status.error {
+            color: #ff6b6b;
+        }
+
+        .cards-container {
+            display: grid;
+            gap: 20px;
+        }
+
+        .card {
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 15px;
+            padding: 25px;
+            backdrop-filter: blur(10px);
+            transition: all 0.3s ease;
+        }
+
+        .card:hover {
+            border-color: #00d9ff;
+            box-shadow: 0 0 20px rgba(0, 217, 255, 0.2);
+        }
+
+        .card-header {
+            display: flex;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+
+        .card-icon {
+            width: 50px;
+            height: 50px;
+            background: linear-gradient(135deg, #00d9ff 0%, #0077b6 100%);
+            border-radius: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin-right: 15px;
+            font-size: 1.5rem;
+        }
+
+        .card-title {
+            font-size: 1.1rem;
+            color: #00d9ff;
+        }
+
+        .card-subtitle {
+            font-size: 0.85rem;
+            color: #888;
+            margin-top: 3px;
+        }
+
+        .card-info {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+        }
+
+        .info-item {
+            background: rgba(0, 0, 0, 0.2);
+            padding: 15px;
+            border-radius: 10px;
+        }
+
+        .info-label {
+            font-size: 0.75rem;
+            color: #888;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 5px;
+        }
+
+        .info-value {
+            font-family: 'Monaco', 'Menlo', monospace;
+            font-size: 1rem;
+            color: #fff;
+            word-break: break-all;
+        }
+
+        .uid-value {
+            font-size: 1.2rem;
+            color: #00d9ff;
+            font-weight: bold;
+        }
+
+        .no-cards {
+            text-align: center;
+            padding: 50px;
+            color: #666;
+        }
+
+        .no-cards-icon {
+            font-size: 4rem;
+            margin-bottom: 20px;
+        }
+
+        .raw-output {
+            margin-top: 30px;
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 10px;
+            padding: 20px;
+        }
+
+        .raw-output summary {
+            cursor: pointer;
+            color: #888;
+            font-size: 0.9rem;
+        }
+
+        .raw-output pre {
+            margin-top: 15px;
+            font-family: 'Monaco', 'Menlo', monospace;
+            font-size: 0.8rem;
+            color: #aaa;
+            white-space: pre-wrap;
+            word-break: break-all;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        .scanning-animation {
+            animation: pulse 1.5s infinite;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>PN532 NFC Reader</h1>
+
+        <button class="scan-btn" id="scanBtn" onclick="scanCards()">
+            Scan
+        </button>
+
+        <div class="status" id="status">Click "Scan" to detect NFC cards</div>
+
+        <div class="cards-container" id="cardsContainer"></div>
+
+        <details class="raw-output" id="rawOutput" style="display: none;">
+            <summary>Raw Output</summary>
+            <pre id="rawOutputContent"></pre>
+        </details>
+    </div>
+
+    <script>
+        async function scanCards() {
+            const btn = document.getElementById('scanBtn');
+            const status = document.getElementById('status');
+            const container = document.getElementById('cardsContainer');
+            const rawOutput = document.getElementById('rawOutput');
+            const rawOutputContent = document.getElementById('rawOutputContent');
+
+            btn.disabled = true;
+            btn.textContent = 'Scanning...';
+            btn.classList.add('scanning-animation');
+            status.className = 'status scanning';
+            status.textContent = 'Scanning for NFC cards...';
+
+            try {
+                const response = await fetch('/api/scan');
+                const data = await response.json();
+
+                if (data.success) {
+                    if (data.cards.length > 0) {
+                        status.className = 'status';
+                        status.textContent = `Found ${data.cards.length} card(s)`;
+                        renderCards(data.cards);
+                    } else {
+                        status.className = 'status';
+                        status.textContent = 'No cards detected';
+                        container.innerHTML = `
+                            <div class="no-cards">
+                                <div class="no-cards-icon">📡</div>
+                                <p>No NFC cards detected. Place a card on the reader and try again.</p>
+                            </div>
+                        `;
+                    }
+                } else {
+                    status.className = 'status error';
+                    status.textContent = `Error: ${data.error}`;
+                    container.innerHTML = '';
+                }
+
+                // Show raw output
+                if (data.raw_output) {
+                    rawOutput.style.display = 'block';
+                    rawOutputContent.textContent = data.raw_output;
+                }
+
+            } catch (error) {
+                status.className = 'status error';
+                status.textContent = `Connection error: ${error.message}`;
+                container.innerHTML = '';
+            } finally {
+                btn.disabled = false;
+                btn.textContent = 'Scan';
+                btn.classList.remove('scanning-animation');
+            }
+        }
+
+        function renderCards(cards) {
+            const container = document.getElementById('cardsContainer');
+            container.innerHTML = cards.map(card => `
+                <div class="card">
+                    <div class="card-header">
+                        <div class="card-icon">💳</div>
+                        <div>
+                            <div class="card-title">${card.type || 'NFC Card'}</div>
+                            <div class="card-subtitle">${card.device || 'Unknown device'}</div>
+                        </div>
+                    </div>
+                    <div class="card-info">
+                        <div class="info-item">
+                            <div class="info-label">UID</div>
+                            <div class="info-value uid-value">${card.uid || 'N/A'}</div>
+                        </div>
+                        <div class="info-item">
+                            <div class="info-label">ATQA</div>
+                            <div class="info-value">${card.atqa || 'N/A'}</div>
+                        </div>
+                        <div class="info-item">
+                            <div class="info-label">SAK</div>
+                            <div class="info-value">${card.sak || 'N/A'}</div>
+                        </div>
+                        ${card.ats ? `
+                        <div class="info-item">
+                            <div class="info-label">ATS</div>
+                            <div class="info-value">${card.ats}</div>
+                        </div>
+                        ` : ''}
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        // Auto-scan on page load
+        window.addEventListener('load', () => {
+            scanCards();
+        });
+    </script>
+</body>
+</html>
