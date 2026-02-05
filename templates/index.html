@@ -453,6 +453,7 @@
                 <div class="log-header">
                     <h3>Communication Log</h3>
                     <div class="log-controls">
+                        <button class="clear-btn" onclick="clearReadLogs()">Clear</button>
                         <span class="log-count" id="readLogCount">0 entries</span>
                     </div>
                 </div>
@@ -725,6 +726,12 @@
             } catch (error) {
                 console.error('Failed to clear logs:', error);
             }
+        }
+
+        function clearReadLogs() {
+            document.getElementById('readLogContent').innerHTML =
+                '<div class="log-empty">Logs cleared</div>';
+            document.getElementById('readLogCount').textContent = '0 entries';
         }
 
         async function toggleEmulation() {
