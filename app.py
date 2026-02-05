@@ -5,9 +5,17 @@ Web interface for PN532 NFC reader using libnfc
 
 import subprocess
 import re
-from flask import Flask, render_template, jsonify
+import os
+import signal
+import tempfile
+import ndef
+from flask import Flask, render_template, jsonify, request
 
 app = Flask(__name__)
+
+# Store emulation process
+emulation_process = None
+ndef_file_path = None
 
 
 def parse_nfc_list_output(output: str) -> list[dict]:
@@ -101,6 +109,23 @@ def run_nfc_list() -> dict:
         }
 
 
+def create_ndef_file(ndef_type: str, content: str) -> str:
+    """Create NDEF file and return path."""
+    if ndef_type == 'url':
+        record = ndef.UriRecord(content)
+    elif ndef_type == 'text':
+        record = ndef.TextRecord(content)
+    else:
+        raise ValueError(f"Unknown NDEF type: {ndef_type}")
+
+    # Create temp file
+    fd, path = tempfile.mkstemp(suffix='.ndef')
+    with os.fdopen(fd, 'wb') as f:
+        f.write(b''.join(ndef.message_encoder([record])))
+
+    return path
+
+
 @app.route('/')
 def index():
     """Render the main page."""
@@ -112,6 +137,103 @@ def scan():
     """Scan for NFC cards."""
     result = run_nfc_list()
     return jsonify(result)
+
+
+@app.route('/api/emulate/start', methods=['POST'])
+def emulate_start():
+    """Start Type 4 tag emulation."""
+    global emulation_process, ndef_file_path
+
+    # Check if already emulating
+    if emulation_process and emulation_process.poll() is None:
+        return jsonify({
+            'success': False,
+            'error': 'Emulation already running'
+        })
+
+    data = request.get_json()
+    ndef_type = data.get('type', 'text')
+    content = data.get('content', '')
+
+    if not content:
+        return jsonify({
+            'success': False,
+            'error': 'Content is required'
+        })
+
+    try:
+        # Create NDEF file
+        ndef_file_path = create_ndef_file(ndef_type, content)
+
+        # Start emulation
+        emulation_process = subprocess.Popen(
+            ['nfc-emulate-forum-tag4', ndef_file_path],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            preexec_fn=os.setsid
+        )
+
+        return jsonify({
+            'success': True,
+            'message': f'Emulating Type 4 tag with {ndef_type}: {content}',
+            'pid': emulation_process.pid
+        })
+
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        })
+
+
+@app.route('/api/emulate/stop', methods=['POST'])
+def emulate_stop():
+    """Stop Type 4 tag emulation."""
+    global emulation_process, ndef_file_path
+
+    if not emulation_process:
+        return jsonify({
+            'success': False,
+            'error': 'No emulation running'
+        })
+
+    try:
+        # Kill process group
+        os.killpg(os.getpgid(emulation_process.pid), signal.SIGTERM)
+        emulation_process.wait(timeout=5)
+    except Exception:
+        try:
+            emulation_process.kill()
+        except Exception:
+            pass
+
+    emulation_process = None
+
+    # Clean up NDEF file
+    if ndef_file_path and os.path.exists(ndef_file_path):
+        os.remove(ndef_file_path)
+        ndef_file_path = None
+
+    return jsonify({
+        'success': True,
+        'message': 'Emulation stopped'
+    })
+
+
+@app.route('/api/emulate/status')
+def emulate_status():
+    """Get emulation status."""
+    global emulation_process
+
+    if emulation_process and emulation_process.poll() is None:
+        return jsonify({
+            'running': True,
+            'pid': emulation_process.pid
+        })
+
+    return jsonify({
+        'running': False
+    })
 
 
 if __name__ == '__main__':

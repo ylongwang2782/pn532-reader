@@ -31,7 +31,39 @@
             color: #00d9ff;
         }
 
-        .scan-btn {
+        .tabs {
+            display: flex;
+            margin-bottom: 20px;
+            border-bottom: 2px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .tab {
+            padding: 15px 30px;
+            cursor: pointer;
+            color: #888;
+            border-bottom: 2px solid transparent;
+            margin-bottom: -2px;
+            transition: all 0.3s ease;
+        }
+
+        .tab:hover {
+            color: #fff;
+        }
+
+        .tab.active {
+            color: #00d9ff;
+            border-bottom-color: #00d9ff;
+        }
+
+        .tab-content {
+            display: none;
+        }
+
+        .tab-content.active {
+            display: block;
+        }
+
+        .scan-btn, .emulate-btn {
             display: block;
             width: 200px;
             margin: 0 auto 30px;
@@ -47,19 +79,28 @@
             box-shadow: 0 4px 15px rgba(0, 217, 255, 0.3);
         }
 
-        .scan-btn:hover {
+        .scan-btn:hover, .emulate-btn:hover {
             transform: translateY(-2px);
             box-shadow: 0 6px 20px rgba(0, 217, 255, 0.4);
         }
 
-        .scan-btn:active {
+        .scan-btn:active, .emulate-btn:active {
             transform: translateY(0);
         }
 
-        .scan-btn:disabled {
+        .scan-btn:disabled, .emulate-btn:disabled {
             background: #555;
             cursor: not-allowed;
             box-shadow: none;
+        }
+
+        .emulate-btn.stop {
+            background: linear-gradient(135deg, #ff6b6b 0%, #c92a2a 100%);
+            box-shadow: 0 4px 15px rgba(255, 107, 107, 0.3);
+        }
+
+        .emulate-btn.stop:hover {
+            box-shadow: 0 6px 20px rgba(255, 107, 107, 0.4);
         }
 
         .status {
@@ -69,12 +110,16 @@
             color: #aaa;
         }
 
-        .status.scanning {
+        .status.scanning, .status.emulating {
             color: #00d9ff;
         }
 
         .status.error {
             color: #ff6b6b;
+        }
+
+        .status.success {
+            color: #51cf66;
         }
 
         .cards-container {
@@ -191,6 +236,77 @@
             word-break: break-all;
         }
 
+        /* Emulate form styles */
+        .emulate-form {
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 15px;
+            padding: 25px;
+            margin-bottom: 20px;
+        }
+
+        .form-group {
+            margin-bottom: 20px;
+        }
+
+        .form-group label {
+            display: block;
+            margin-bottom: 8px;
+            color: #aaa;
+            font-size: 0.9rem;
+        }
+
+        .form-group select,
+        .form-group input,
+        .form-group textarea {
+            width: 100%;
+            padding: 12px 15px;
+            background: rgba(0, 0, 0, 0.3);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 10px;
+            color: #fff;
+            font-size: 1rem;
+            font-family: inherit;
+        }
+
+        .form-group select:focus,
+        .form-group input:focus,
+        .form-group textarea:focus {
+            outline: none;
+            border-color: #00d9ff;
+        }
+
+        .form-group textarea {
+            min-height: 100px;
+            resize: vertical;
+        }
+
+        .emulation-status {
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 10px;
+            padding: 20px;
+            text-align: center;
+            margin-bottom: 20px;
+        }
+
+        .emulation-status.running {
+            border: 1px solid #51cf66;
+        }
+
+        .status-indicator {
+            display: inline-block;
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            margin-right: 10px;
+            background: #666;
+        }
+
+        .status-indicator.running {
+            background: #51cf66;
+            animation: pulse 1.5s infinite;
+        }
+
         @keyframes pulse {
             0%, 100% { opacity: 1; }
             50% { opacity: 0.5; }
@@ -205,21 +321,84 @@
     <div class="container">
         <h1>PN532 NFC Reader</h1>
 
-        <button class="scan-btn" id="scanBtn" onclick="scanCards()">
-            Scan
-        </button>
+        <div class="tabs">
+            <div class="tab active" onclick="switchTab('read')">Read Card</div>
+            <div class="tab" onclick="switchTab('emulate')">Emulate Tag</div>
+        </div>
 
-        <div class="status" id="status">Click "Scan" to detect NFC cards</div>
+        <!-- Read Tab -->
+        <div id="readTab" class="tab-content active">
+            <button class="scan-btn" id="scanBtn" onclick="scanCards()">
+                Scan
+            </button>
 
-        <div class="cards-container" id="cardsContainer"></div>
+            <div class="status" id="status">Click "Scan" to detect NFC cards</div>
 
-        <details class="raw-output" id="rawOutput" style="display: none;">
-            <summary>Raw Output</summary>
-            <pre id="rawOutputContent"></pre>
-        </details>
+            <div class="cards-container" id="cardsContainer"></div>
+
+            <details class="raw-output" id="rawOutput" style="display: none;">
+                <summary>Raw Output</summary>
+                <pre id="rawOutputContent"></pre>
+            </details>
+        </div>
+
+        <!-- Emulate Tab -->
+        <div id="emulateTab" class="tab-content">
+            <div class="emulation-status" id="emulationStatus">
+                <span class="status-indicator" id="statusIndicator"></span>
+                <span id="emulationStatusText">Not emulating</span>
+            </div>
+
+            <div class="emulate-form">
+                <div class="form-group">
+                    <label for="ndefType">NDEF Type</label>
+                    <select id="ndefType" onchange="updatePlaceholder()">
+                        <option value="url">URL</option>
+                        <option value="text">Text</option>
+                    </select>
+                </div>
+
+                <div class="form-group">
+                    <label for="ndefContent">Content</label>
+                    <textarea id="ndefContent" placeholder="https://example.com"></textarea>
+                </div>
+            </div>
+
+            <button class="emulate-btn" id="emulateBtn" onclick="toggleEmulation()">
+                Start Emulation
+            </button>
+
+            <div class="status" id="emulateStatus"></div>
+        </div>
     </div>
 
     <script>
+        let isEmulating = false;
+
+        function switchTab(tab) {
+            document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+            document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+
+            if (tab === 'read') {
+                document.querySelector('.tab:first-child').classList.add('active');
+                document.getElementById('readTab').classList.add('active');
+            } else {
+                document.querySelector('.tab:last-child').classList.add('active');
+                document.getElementById('emulateTab').classList.add('active');
+                checkEmulationStatus();
+            }
+        }
+
+        function updatePlaceholder() {
+            const type = document.getElementById('ndefType').value;
+            const content = document.getElementById('ndefContent');
+            if (type === 'url') {
+                content.placeholder = 'https://example.com';
+            } else {
+                content.placeholder = 'Hello, NFC!';
+            }
+        }
+
         async function scanCards() {
             const btn = document.getElementById('scanBtn');
             const status = document.getElementById('status');
@@ -308,6 +487,99 @@
                     </div>
                 </div>
             `).join('');
+        }
+
+        async function checkEmulationStatus() {
+            try {
+                const response = await fetch('/api/emulate/status');
+                const data = await response.json();
+                updateEmulationUI(data.running);
+            } catch (error) {
+                console.error('Failed to check emulation status:', error);
+            }
+        }
+
+        function updateEmulationUI(running) {
+            isEmulating = running;
+            const btn = document.getElementById('emulateBtn');
+            const indicator = document.getElementById('statusIndicator');
+            const statusText = document.getElementById('emulationStatusText');
+            const statusBox = document.getElementById('emulationStatus');
+
+            if (running) {
+                btn.textContent = 'Stop Emulation';
+                btn.classList.add('stop');
+                indicator.classList.add('running');
+                statusText.textContent = 'Emulating Type 4 Tag...';
+                statusBox.classList.add('running');
+            } else {
+                btn.textContent = 'Start Emulation';
+                btn.classList.remove('stop');
+                indicator.classList.remove('running');
+                statusText.textContent = 'Not emulating';
+                statusBox.classList.remove('running');
+            }
+        }
+
+        async function toggleEmulation() {
+            const btn = document.getElementById('emulateBtn');
+            const status = document.getElementById('emulateStatus');
+
+            btn.disabled = true;
+
+            if (isEmulating) {
+                // Stop emulation
+                try {
+                    const response = await fetch('/api/emulate/stop', { method: 'POST' });
+                    const data = await response.json();
+
+                    if (data.success) {
+                        status.className = 'status';
+                        status.textContent = 'Emulation stopped';
+                        updateEmulationUI(false);
+                    } else {
+                        status.className = 'status error';
+                        status.textContent = `Error: ${data.error}`;
+                    }
+                } catch (error) {
+                    status.className = 'status error';
+                    status.textContent = `Connection error: ${error.message}`;
+                }
+            } else {
+                // Start emulation
+                const ndefType = document.getElementById('ndefType').value;
+                const content = document.getElementById('ndefContent').value.trim();
+
+                if (!content) {
+                    status.className = 'status error';
+                    status.textContent = 'Please enter content';
+                    btn.disabled = false;
+                    return;
+                }
+
+                try {
+                    const response = await fetch('/api/emulate/start', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ type: ndefType, content: content })
+                    });
+                    const data = await response.json();
+
+                    if (data.success) {
+                        status.className = 'status success';
+                        status.textContent = data.message;
+                        updateEmulationUI(true);
+                    } else {
+                        status.className = 'status error';
+                        status.textContent = `Error: ${data.error}`;
+                    }
+                } catch (error) {
+                    status.className = 'status error';
+                    status.textContent = `Connection error: ${error.message}`;
+                }
+            }
+
+            btn.disabled = false;
         }
 
         // Auto-scan on page load
