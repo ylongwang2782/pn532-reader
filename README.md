@@ -35,14 +35,15 @@ All communication with the PN532 uses the Normal Information Frame format:
 
 | Field | Bytes | Description |
 |-------|-------|-------------|
-| Preamble | `00` | Sync byte |
-| Start Code | `00 FF` | Frame start marker |
-| LEN | 1 byte | Data length (TFI + DATA) |
-| LCS | 1 byte | Length checksum (LEN + LCS = 0x00 mod 256) |
-| TFI | `D4` or `D5` | `D4` = Host→PN532, `D5` = PN532→Host |
-| DATA | LEN-1 bytes | Command code + parameters |
-| DCS | 1 byte | Data checksum (TFI + DATA + DCS = 0x00 mod 256) |
-| Postamble | `00` | Frame end |
+| Preamble | `00` | 1 byte sync |
+| Start Code | `00 FF` | 2 bytes frame start marker |
+| LEN | 1 byte | Number of bytes in data field (TFI + PD0..PDn) |
+| LCS | 1 byte | Length checksum: Lower byte of [LEN + LCS] = 0x00 |
+| TFI | `D4` or `D5` | Frame identifier: `D4` = Host→PN532, `D5` = PN532→Host |
+| CMD | 1 byte | Command code (PD0, first byte of DATA) |
+| Params | LEN-2 bytes | Command parameters (PD1..PDn) |
+| DCS | 1 byte | Data checksum: Lower byte of [TFI + PD0 + ... + PDn + DCS] = 0x00 |
+| Postamble | `00` | 1 byte frame end |
 
 ### Special Frames
 

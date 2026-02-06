@@ -472,11 +472,13 @@
             white-space: nowrap;
         }
 
-        .log-frame-field.f-header .log-frame-value { background: rgba(0, 150, 200, 0.15); }
+        .log-frame-field.f-preamble .log-frame-value { background: rgba(100, 100, 100, 0.15); }
+        .log-frame-field.f-startcode .log-frame-value { background: rgba(0, 150, 200, 0.15); }
         .log-frame-field.f-len .log-frame-value { background: rgba(200, 150, 0, 0.15); }
         .log-frame-field.f-lcs .log-frame-value { background: rgba(200, 100, 0, 0.15); }
         .log-frame-field.f-tfi .log-frame-value { background: rgba(150, 0, 200, 0.15); }
-        .log-frame-field.f-data .log-frame-value { background: rgba(0, 200, 100, 0.15); }
+        .log-frame-field.f-cmd .log-frame-value { background: rgba(0, 200, 100, 0.25); }
+        .log-frame-field.f-params .log-frame-value { background: rgba(0, 200, 100, 0.10); }
         .log-frame-field.f-dcs .log-frame-value { background: rgba(200, 0, 100, 0.15); }
         .log-frame-field.f-end .log-frame-value { background: rgba(100, 100, 100, 0.15); }
 
@@ -685,23 +687,33 @@
                     }
                 }
 
-                const dataStart = 6;
-                const dataEnd = 5 + len; // TFI is at index 5, data is len bytes starting from TFI
+                // Frame layout: [0]=Preamble [1,2]=StartCode [3]=LEN [4]=LCS
+                //               [5]=TFI [6]=CMD [7..dataEnd-1]=Params
+                //               [dataEnd]=DCS [dataEnd+1]=Postamble
+                const cmdIndex = 6;
+                const paramsStart = 7;
+                const dataEnd = 5 + len; // TFI at 5, LEN bytes total from TFI
                 const dcsIndex = dataEnd;
                 const postambleIndex = dcsIndex + 1;
 
                 const fields = [
-                    { cls: 'f-header', value: hexRange(0, 3), label: 'Header' },
+                    { cls: 'f-preamble', value: hex(bytes[0]), label: 'PRE' },
+                    { cls: 'f-startcode', value: hexRange(1, 3), label: 'START' },
                     { cls: 'f-len', value: hex(len), label: 'LEN' },
                     { cls: 'f-lcs', value: hex(lcs), label: 'LCS' },
                     { cls: 'f-tfi', value: hex(tfi), label: 'TFI' },
-                    { cls: 'f-data', value: hexRange(dataStart, dataEnd), label: 'DATA' },
                 ];
+                if (cmdIndex < dataEnd) {
+                    fields.push({ cls: 'f-cmd', value: hex(bytes[cmdIndex]), label: 'CMD' });
+                }
+                if (paramsStart < dataEnd) {
+                    fields.push({ cls: 'f-params', value: hexRange(paramsStart, dataEnd), label: 'Params' });
+                }
                 if (dcsIndex < bytes.length) {
                     fields.push({ cls: 'f-dcs', value: hex(bytes[dcsIndex]), label: 'DCS' });
                 }
                 if (postambleIndex < bytes.length) {
-                    fields.push({ cls: 'f-end', value: hex(bytes[postambleIndex]), label: 'End' });
+                    fields.push({ cls: 'f-end', value: hex(bytes[postambleIndex]), label: 'POST' });
                 }
 
                 return {
