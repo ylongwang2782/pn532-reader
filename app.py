@@ -1,17 +1,11 @@
 #!/usr/bin/env python3
 """
-Web interface for PN532 NFC reader using libnfc
+Web interface for PN532 NFC reader — direct serial communication.
 """
 
-import subprocess
-import re
-import os
-import signal
-import tempfile
 import threading
-import time
 from collections import deque
-from datetime import datetime
+
 import ndef
 from flask import Flask, render_template, jsonify, request
 from pn532 import PN532
@@ -21,181 +15,22 @@ app = Flask(__name__)
 # PN532 direct serial reader
 pn532_reader = PN532()
 
-# Store emulation process and logs
-emulation_process = None
-ndef_file_path = None
+# Emulation state
+emulation_thread = None
+emulation_stop_event = None
 log_buffer = deque(maxlen=500)
 log_lock = threading.Lock()
-log_reader_thread = None
 
 
-def parse_nfc_list_output(output: str) -> list[dict]:
-    """Parse nfc-list output and extract card information."""
-    cards = []
-    current_card = None
-    device_name = None
-
-    for line in output.split('\n'):
-        if 'NFC device:' in line and 'opened' in line:
-            match = re.search(r'NFC device: (.+?) opened', line)
-            if match:
-                device_name = match.group(1)
-
-        if 'ISO/IEC 14443A' in line or 'ISO/IEC 14443B' in line:
-            if current_card:
-                cards.append(current_card)
-            current_card = {
-                'type': line.strip(),
-                'device': device_name,
-                'atqa': None,
-                'uid': None,
-                'sak': None,
-                'ats': None
-            }
-
-        if current_card:
-            if 'ATQA' in line:
-                match = re.search(r':\s*(.+)', line)
-                if match:
-                    current_card['atqa'] = match.group(1).strip()
-            elif 'UID' in line or 'NFCID' in line:
-                match = re.search(r':\s*(.+)', line)
-                if match:
-                    current_card['uid'] = match.group(1).strip()
-            elif 'SAK' in line:
-                match = re.search(r':\s*(.+)', line)
-                if match:
-                    current_card['sak'] = match.group(1).strip()
-            elif 'ATS' in line:
-                match = re.search(r':\s*(.+)', line)
-                if match:
-                    current_card['ats'] = match.group(1).strip()
-
-    if current_card:
-        cards.append(current_card)
-
-    seen_uids = set()
-    unique_cards = []
-    for card in cards:
-        if card['uid'] and card['uid'] not in seen_uids:
-            seen_uids.add(card['uid'])
-            unique_cards.append(card)
-
-    return unique_cards
-
-
-def parse_log_line(line: str) -> dict | None:
-    """Parse a libnfc debug log line and extract TX/RX data."""
-    timestamp = datetime.now().strftime('%H:%M:%S.%f')[:-3]
-
-    # Match TX/RX patterns
-    tx_match = re.search(r'TX:\s*(.+)', line)
-    rx_match = re.search(r'RX:\s*(.+)', line)
-
-    if tx_match:
-        return {
-            'time': timestamp,
-            'direction': 'TX',
-            'data': tx_match.group(1).strip(),
-            'raw': line.strip()
-        }
-    elif rx_match:
-        return {
-            'time': timestamp,
-            'direction': 'RX',
-            'data': rx_match.group(1).strip(),
-            'raw': line.strip()
-        }
-
-    return None
-
-
-def log_reader(process):
-    """Read logs from process stderr in a separate thread."""
-    global log_buffer
-
-    try:
-        for line in iter(process.stderr.readline, b''):
-            if not line:
-                break
-            try:
-                decoded = line.decode('utf-8', errors='replace').strip()
-                if decoded:
-                    parsed = parse_log_line(decoded)
-                    if parsed:
-                        with log_lock:
-                            log_buffer.append(parsed)
-            except Exception:
-                pass
-    except Exception:
-        pass
-
-
-def run_nfc_list() -> dict:
-    """Run nfc-list command and return parsed results."""
-    try:
-        env = os.environ.copy()
-        env['LIBNFC_LOG_LEVEL'] = '3'
-
-        result = subprocess.run(
-            ['nfc-list'],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            env=env
-        )
-
-        output = result.stdout + result.stderr
-        cards = parse_nfc_list_output(output)
-
-        # Parse logs from output
-        logs = []
-        for line in output.split('\n'):
-            parsed = parse_log_line(line)
-            if parsed:
-                logs.append(parsed)
-
-        return {
-            'success': True,
-            'cards': cards,
-            'raw_output': output,
-            'logs': logs
-        }
-    except subprocess.TimeoutExpired:
-        return {
-            'success': False,
-            'error': 'Command timed out',
-            'cards': [],
-            'logs': []
-        }
-    except Exception as e:
-        return {
-            'success': False,
-            'error': str(e),
-            'cards': [],
-            'logs': []
-        }
-
-
-def run_pn532_scan() -> dict:
-    """Run a direct PN532 scan for ISO 14443A cards."""
-    return pn532_reader.scan_type_a()
-
-
-def create_ndef_file(ndef_type: str, content: str) -> str:
-    """Create NDEF file and return path."""
+def build_ndef_bytes(ndef_type: str, content: str) -> bytes:
+    """Encode an NDEF message and return raw bytes."""
     if ndef_type == 'url':
         record = ndef.UriRecord(content)
     elif ndef_type == 'text':
         record = ndef.TextRecord(content)
     else:
         raise ValueError(f"Unknown NDEF type: {ndef_type}")
-
-    fd, path = tempfile.mkstemp(suffix='.ndef')
-    with os.fdopen(fd, 'wb') as f:
-        f.write(b''.join(ndef.message_encoder([record])))
-
-    return path
+    return b''.join(ndef.message_encoder([record]))
 
 
 @app.route('/')
@@ -207,16 +42,16 @@ def index():
 @app.route('/api/scan')
 def scan():
     """Scan for NFC cards."""
-    result = run_pn532_scan()
+    result = pn532_reader.scan_type_a()
     return jsonify(result)
 
 
 @app.route('/api/emulate/start', methods=['POST'])
 def emulate_start():
     """Start Type 4 tag emulation."""
-    global emulation_process, ndef_file_path, log_buffer, log_reader_thread
+    global emulation_thread, emulation_stop_event
 
-    if emulation_process and emulation_process.poll() is None:
+    if emulation_thread and emulation_thread.is_alive():
         return jsonify({
             'success': False,
             'error': 'Emulation already running'
@@ -233,36 +68,24 @@ def emulate_start():
         })
 
     try:
-        ndef_file_path = create_ndef_file(ndef_type, content)
+        ndef_bytes = build_ndef_bytes(ndef_type, content)
 
         # Clear log buffer
         with log_lock:
             log_buffer.clear()
 
-        # Set environment for debug logging
-        env = os.environ.copy()
-        env['LIBNFC_LOG_LEVEL'] = '3'
+        emulation_stop_event = threading.Event()
 
-        emulation_process = subprocess.Popen(
-            ['nfc-emulate-forum-tag4', ndef_file_path],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            env=env,
-            preexec_fn=os.setsid
+        emulation_thread = threading.Thread(
+            target=pn532_reader.emulate_tag,
+            args=(ndef_bytes, emulation_stop_event, log_buffer),
+            daemon=True,
         )
-
-        # Start log reader thread
-        log_reader_thread = threading.Thread(
-            target=log_reader,
-            args=(emulation_process,),
-            daemon=True
-        )
-        log_reader_thread.start()
+        emulation_thread.start()
 
         return jsonify({
             'success': True,
             'message': f'Emulating Type 4 tag with {ndef_type}: {content}',
-            'pid': emulation_process.pid
         })
 
     except Exception as e:
@@ -275,28 +98,18 @@ def emulate_start():
 @app.route('/api/emulate/stop', methods=['POST'])
 def emulate_stop():
     """Stop Type 4 tag emulation."""
-    global emulation_process, ndef_file_path
+    global emulation_thread, emulation_stop_event
 
-    if not emulation_process:
+    if not emulation_thread or not emulation_thread.is_alive():
         return jsonify({
             'success': False,
             'error': 'No emulation running'
         })
 
-    try:
-        os.killpg(os.getpgid(emulation_process.pid), signal.SIGTERM)
-        emulation_process.wait(timeout=5)
-    except Exception:
-        try:
-            emulation_process.kill()
-        except Exception:
-            pass
-
-    emulation_process = None
-
-    if ndef_file_path and os.path.exists(ndef_file_path):
-        os.remove(ndef_file_path)
-        ndef_file_path = None
+    emulation_stop_event.set()
+    emulation_thread.join(timeout=5)
+    emulation_thread = None
+    emulation_stop_event = None
 
     return jsonify({
         'success': True,
@@ -307,17 +120,10 @@ def emulate_stop():
 @app.route('/api/emulate/status')
 def emulate_status():
     """Get emulation status."""
-    global emulation_process
+    if emulation_thread and emulation_thread.is_alive():
+        return jsonify({'running': True})
 
-    if emulation_process and emulation_process.poll() is None:
-        return jsonify({
-            'running': True,
-            'pid': emulation_process.pid
-        })
-
-    return jsonify({
-        'running': False
-    })
+    return jsonify({'running': False})
 
 
 @app.route('/api/logs')

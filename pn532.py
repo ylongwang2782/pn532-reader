@@ -1,7 +1,9 @@
 """
-PN532 direct serial communication for ISO 14443A card scanning.
+PN532 direct serial communication for ISO 14443A card scanning and
+Type 4 Tag emulation.
 """
 
+import struct
 import threading
 import time
 from dataclasses import dataclass, field
@@ -205,6 +207,42 @@ class PN532:
         """Enter power-down mode."""
         return self._send_command(0x16, b"\xF0", logs=logs)
 
+    def set_parameters(self, flags, logs=None):
+        """SetParameters (0x12). flags is a single byte."""
+        return self._send_command(0x12, bytes([flags]), logs=logs)
+
+    def tg_init_as_target(self, mode, mifare_params, felica_params,
+                          nfcid3t, gt=b"", tk=b"", timeout=60.0, logs=None):
+        """
+        TgInitAsTarget (0x8C) — configure PN532 as a target.
+        Blocks until a reader activates us or timeout expires.
+        Returns response data or None.
+        """
+        params = (
+            bytes([mode])
+            + bytes(mifare_params)    # 6 bytes
+            + bytes(felica_params)    # 18 bytes
+            + bytes(nfcid3t)          # 10 bytes
+            + bytes([len(gt)]) + bytes(gt)
+            + bytes([len(tk)]) + bytes(tk)
+        )
+        return self._send_command(0x8C, params, timeout=timeout, logs=logs)
+
+    def tg_get_data(self, timeout=60.0, logs=None):
+        """
+        TgGetData (0x86) — receive C-APDU from reader.
+        Blocks until data arrives or timeout expires.
+        Returns response data (D5 87 Status DataIn...) or None.
+        """
+        return self._send_command(0x86, b"", timeout=timeout, logs=logs)
+
+    def tg_set_data(self, data, logs=None):
+        """
+        TgSetData (0x8E) — send R-APDU to reader.
+        Returns response data or None.
+        """
+        return self._send_command(0x8E, bytes(data), logs=logs)
+
     # -- Response parsing --
 
     def _parse_14443a_target(self, resp):
@@ -346,3 +384,181 @@ class PN532:
                 }
             finally:
                 self._close()
+
+    # -- Type 4 Tag emulation --
+
+    def emulate_tag(self, ndef_bytes, stop_event, logs):
+        """
+        Emulate an NFC Forum Type 4 Tag.
+        Runs until stop_event is set or an unrecoverable error occurs.
+        Appends log dicts to the ``logs`` deque (thread-safe via caller's lock).
+
+        ndef_bytes: raw NDEF message bytes (without length prefix).
+        stop_event: threading.Event signalling when to stop.
+        logs: collections.deque to append log entries to.
+        """
+        emulator = Type4TagEmulator(ndef_bytes)
+
+        # TgInitAsTarget parameters for ISO14443-4 PICC
+        mode = 0x05  # PassiveOnly | PICCOnly
+        mifare_params = bytes([
+            0x04, 0x00,        # SENS_RES (ATQA)
+            0x01, 0x02, 0x03,  # NFCID1t (3-byte UID)
+            0x20,              # SEL_RES (SAK — ISO14443-4 compliant)
+        ])
+        felica_params = bytes(18)  # not used
+        nfcid3t = bytes([0x01, 0x02, 0x03, 0x04, 0x05,
+                         0x06, 0x07, 0x08, 0x09, 0x0A])
+        # ATS Historical Bytes — needed for Android to recognize Type 4 Tag.
+        # Format: category indicator 0x80 (status indicator only, no TLV data)
+        tk = bytes([0x80])
+
+        with self._lock:
+            try:
+                self._open()
+                self._wakeup(logs)
+                self.sam_configuration(logs)
+                self.set_parameters(0x24, logs)  # fAutomaticATR_RES | fISO14443-4_PICC
+
+                while not stop_event.is_set():
+                    # Wait for reader activation
+                    resp = self.tg_init_as_target(
+                        mode, mifare_params, felica_params, nfcid3t,
+                        tk=tk, timeout=2.0, logs=logs,
+                    )
+                    if resp is None:
+                        # Timeout — no reader yet, loop and retry
+                        continue
+
+                    # Activated — handle APDU exchange loop
+                    while not stop_event.is_set():
+                        resp = self.tg_get_data(timeout=2.0, logs=logs)
+                        if resp is None:
+                            # Timeout waiting for data, re-check stop
+                            continue
+
+                        # resp: D5 87 Status [DataIn...]
+                        if len(resp) < 3:
+                            break
+                        status = resp[2]
+                        if status != 0x00:
+                            # 0x29 = target released by initiator
+                            break
+
+                        c_apdu = resp[3:]
+                        r_apdu = emulator.handle_apdu(c_apdu)
+                        send_resp = self.tg_set_data(r_apdu, logs=logs)
+                        if send_resp is None:
+                            break
+                        # Check TgSetData status
+                        if len(send_resp) >= 3 and send_resp[2] != 0x00:
+                            break
+
+            except serial.SerialException as e:
+                logs.append({
+                    "time": self._timestamp(),
+                    "direction": "ERR",
+                    "data": f"Serial error: {e}",
+                })
+            except Exception as e:
+                logs.append({
+                    "time": self._timestamp(),
+                    "direction": "ERR",
+                    "data": f"Error: {e}",
+                })
+            finally:
+                self._close()
+
+
+class Type4TagEmulator:
+    """
+    NFC Forum Type 4 Tag APDU handler.
+
+    Implements a minimal virtual file system with a Capability Container (CC)
+    and an NDEF file, responding to SELECT and READ BINARY APDUs.
+    """
+
+    CC_FILE_ID = 0xE103
+    NDEF_FILE_ID = 0xE104
+
+    def __init__(self, ndef_message_bytes):
+        self._ndef_msg = bytes(ndef_message_bytes)
+        # NDEF file contents: 2-byte big-endian length prefix + message
+        self._ndef_file = struct.pack(">H", len(self._ndef_msg)) + self._ndef_msg
+        ndef_max_size = len(self._ndef_file)
+
+        # Capability Container (15 bytes)
+        self._cc_file = bytes([
+            0x00, 0x0F,        # CC length
+            0x20,              # Mapping version 2.0
+            0x00, 0x3B,        # MLe (max read = 59)
+            0x00, 0x34,        # MLc (max write = 52)
+            0x04, 0x06,        # NDEF File Control TLV: type=0x04, length=6
+            0xE1, 0x04,        # NDEF file ID
+        ]) + struct.pack(">H", ndef_max_size) + bytes([
+            0x00,              # Read access: free
+            0xFF,              # Write access: denied
+        ])
+
+        self._selected_file = None
+
+    def handle_apdu(self, apdu):
+        """
+        Process a C-APDU and return the R-APDU bytes.
+        """
+        if len(apdu) < 4:
+            return bytes([0x6D, 0x00])  # INS not supported
+
+        cla, ins, p1, p2 = apdu[0], apdu[1], apdu[2], apdu[3]
+
+        if ins == 0xA4:  # SELECT
+            return self._handle_select(apdu)
+        elif ins == 0xB0:  # READ BINARY
+            return self._handle_read_binary(apdu)
+        elif ins == 0xD6:  # UPDATE BINARY
+            return bytes([0x6A, 0x82])  # write denied
+        else:
+            return bytes([0x6D, 0x00])  # INS not supported
+
+    def _handle_select(self, apdu):
+        """Handle SELECT command."""
+        if len(apdu) < 5:
+            return bytes([0x6A, 0x82])
+
+        p1, p2 = apdu[2], apdu[3]
+        lc = apdu[4]
+        data = apdu[5:5 + lc]
+
+        # SELECT by AID (P1=0x04)
+        if p1 == 0x04:
+            ndef_aid = bytes([0xD2, 0x76, 0x00, 0x00, 0x85, 0x01, 0x01])
+            if data == ndef_aid:
+                return bytes([0x90, 0x00])
+            return bytes([0x6A, 0x82])  # application not found
+
+        # SELECT by File ID (P1=0x00)
+        if p1 == 0x00 and len(data) == 2:
+            file_id = (data[0] << 8) | data[1]
+            if file_id == self.CC_FILE_ID:
+                self._selected_file = self._cc_file
+                return bytes([0x90, 0x00])
+            elif file_id == self.NDEF_FILE_ID:
+                self._selected_file = self._ndef_file
+                return bytes([0x90, 0x00])
+            return bytes([0x6A, 0x82])  # file not found
+
+        return bytes([0x6A, 0x82])
+
+    def _handle_read_binary(self, apdu):
+        """Handle READ BINARY command."""
+        if self._selected_file is None:
+            return bytes([0x6A, 0x82])  # no file selected
+
+        offset = (apdu[2] << 8) | apdu[3]
+        le = apdu[4] if len(apdu) > 4 else 0
+
+        if offset > len(self._selected_file):
+            return bytes([0x6A, 0x82])
+
+        chunk = self._selected_file[offset:offset + le]
+        return chunk + bytes([0x90, 0x00])
