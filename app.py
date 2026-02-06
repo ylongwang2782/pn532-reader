@@ -14,8 +14,12 @@ from collections import deque
 from datetime import datetime
 import ndef
 from flask import Flask, render_template, jsonify, request
+from pn532 import PN532
 
 app = Flask(__name__)
+
+# PN532 direct serial reader
+pn532_reader = PN532()
 
 # Store emulation process and logs
 emulation_process = None
@@ -173,6 +177,11 @@ def run_nfc_list() -> dict:
         }
 
 
+def run_pn532_scan() -> dict:
+    """Run a direct PN532 scan for ISO 14443A cards."""
+    return pn532_reader.scan_type_a()
+
+
 def create_ndef_file(ndef_type: str, content: str) -> str:
     """Create NDEF file and return path."""
     if ndef_type == 'url':
@@ -198,7 +207,7 @@ def index():
 @app.route('/api/scan')
 def scan():
     """Scan for NFC cards."""
-    result = run_nfc_list()
+    result = run_pn532_scan()
     return jsonify(result)
 
 
