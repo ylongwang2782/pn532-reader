@@ -771,6 +771,39 @@
             }
         }
 
+        // Merge fragmented RX entries into complete frames.
+        // ACK/NACK are kept standalone; consecutive non-ACK RX lines are concatenated.
+        function mergeLogs(logs) {
+            const ACK = '00 00 ff 00 ff 00';
+            const NACK = '00 00 ff ff 00 00';
+            const merged = [];
+            let pending = null;
+
+            for (const log of logs) {
+                const dataLower = log.data.toLowerCase().trim();
+
+                if (log.direction === 'TX') {
+                    if (pending) { merged.push(pending); pending = null; }
+                    merged.push(log);
+                } else {
+                    // RX
+                    if (dataLower === ACK || dataLower === NACK) {
+                        if (pending) { merged.push(pending); pending = null; }
+                        merged.push(log);
+                    } else {
+                        // Non-ACK RX fragment — merge with pending
+                        if (pending) {
+                            pending = { ...pending, data: pending.data + ' ' + log.data };
+                        } else {
+                            pending = { ...log };
+                        }
+                    }
+                }
+            }
+            if (pending) merged.push(pending);
+            return merged;
+        }
+
         function renderLogs(logs, containerId, countId) {
             const container = document.getElementById(containerId);
             const countEl = document.getElementById(countId);
@@ -781,7 +814,9 @@
                 return;
             }
 
-            container.innerHTML = logs.map(log => {
+            const mergedLogs = mergeLogs(logs);
+
+            container.innerHTML = mergedLogs.map(log => {
                 const parsed = parsePN532Frame(log.data);
                 const frame = renderFrameHtml(parsed);
                 const dir = log.direction.toLowerCase();
@@ -795,7 +830,7 @@
                 `</div>`;
             }).join('');
 
-            countEl.textContent = `${logs.length} entries`;
+            countEl.textContent = `${mergedLogs.length} entries`;
 
             // Auto-scroll if enabled
             const autoScroll = document.getElementById('autoScroll');
