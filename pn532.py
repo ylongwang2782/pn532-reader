@@ -190,7 +190,21 @@ class PN532:
             # Flush stale data and wait before retrying
             self._serial.reset_input_buffer()
             time.sleep(0.1)
-        return None
+
+        # All soft retries failed — force DTR hardware reset and try once more
+        if logs is not None:
+            logs.append({
+                "time": self._timestamp(),
+                "direction": "TX",
+                "data": "(DTR reset)",
+            })
+        self._serial.dtr = True
+        time.sleep(0.1)
+        self._serial.dtr = False
+        time.sleep(0.5)
+        self._serial.reset_input_buffer()
+        self._wakeup(logs)
+        return self._send_command(0x14, b"\x01\x00", logs=logs)
 
     def get_firmware_version(self, logs=None):
         """Get firmware version. Returns (IC, Ver, Rev, Support) or None."""
@@ -211,6 +225,14 @@ class PN532:
         Returns response data or None.
         """
         return self._send_command(0x4A, bytes([0x01, brty]), timeout=timeout, logs=logs)
+
+    def in_data_exchange(self, tg, data, timeout=2.0, logs=None):
+        """
+        InDataExchange (0x40) — exchange data with an activated target.
+        Returns response data (D5 41 Status DataOut...) or None.
+        """
+        params = bytes([tg]) + bytes(data)
+        return self._send_command(0x40, params, timeout=timeout, logs=logs)
 
     def in_release(self, tg=0x00, logs=None):
         """Release target."""
@@ -398,6 +420,475 @@ class PN532:
             finally:
                 self._close()
 
+    # -- Vault protocol reader --
+
+    def read_vault_tag(self, read_offset=0, read_length=64):
+        """
+        Read data from a card implementing the Vault APDU protocol.
+        Selects the Vault AID, then issues READ BINARY.
+        Returns dict with {success, card_info, data_hex, data_text, logs}.
+        """
+        logs = []
+        vault_aid = bytes([0xF0, 0x01, 0x02, 0x03, 0x04, 0x05])
+
+        with self._lock:
+            try:
+                self._open()
+                self._wakeup(logs)
+
+                resp = self.sam_configuration(logs)
+                if resp is None:
+                    return {"success": False, "error": "SAMConfiguration failed", "logs": logs}
+
+                # MaxRetries
+                self.rf_configuration(0x05, [0xFF, 0x01, 0x02], logs)
+
+                # Detect card
+                resp = self.in_list_passive_target(brty=0x00, timeout=3.0, logs=logs)
+                card = self._parse_14443a_target(resp)
+                if card is None:
+                    self.power_down(logs)
+                    return {"success": False, "error": "No card detected", "logs": logs}
+
+                card_info = {
+                    "uid": card.uid,
+                    "atqa": card.atqa,
+                    "sak": card.sak,
+                    "ats": card.ats if card.ats else None,
+                }
+
+                tg = 0x01
+
+                # SELECT Vault AID: 00 A4 04 00 06 F0 01 02 03 04 05 00
+                select_apdu = bytes([0x00, 0xA4, 0x04, 0x00, len(vault_aid)]) + vault_aid + bytes([0x00])
+                sw1, sw2, _ = self._exchange_apdu(tg, select_apdu, logs)
+                if (sw1, sw2) != (0x90, 0x00):
+                    self.in_release(logs=logs)
+                    self.power_down(logs)
+                    return {"success": False, "error": f"SELECT rejected (SW={sw1:02x}{sw2:02x})", "card_info": card_info, "logs": logs}
+
+                # READ BINARY: 00 B0 00 <offset> <length>
+                read_apdu = bytes([0x00, 0xB0, 0x00, read_offset & 0xFF, read_length & 0xFF])
+                sw1, sw2, payload = self._exchange_apdu(tg, read_apdu, logs)
+
+                data_hex = self._format_hex(payload)
+                # Decode as text, replacing non-printable bytes
+                data_text = "".join(chr(b) if 0x20 <= b < 0x7F else "." for b in payload)
+
+                self.in_release(logs=logs)
+                self.power_down(logs)
+
+                return {
+                    "success": True,
+                    "card_info": card_info,
+                    "data_hex": data_hex,
+                    "data_text": data_text,
+                    "logs": logs,
+                }
+
+            except serial.SerialException as e:
+                return {"success": False, "error": f"Serial port error: {e}", "logs": logs}
+            except Exception as e:
+                return {"success": False, "error": str(e), "logs": logs}
+            finally:
+                self._close()
+
+    def write_vault_tag(self, write_offset, data_bytes):
+        """
+        Write data to a card implementing the Vault APDU protocol.
+        Selects the Vault AID, then issues WRITE (INS=0xD0).
+        Returns dict with {success, card_info, logs}.
+        """
+        logs = []
+        vault_aid = bytes([0xF0, 0x01, 0x02, 0x03, 0x04, 0x05])
+
+        with self._lock:
+            try:
+                self._open()
+                self._wakeup(logs)
+
+                resp = self.sam_configuration(logs)
+                if resp is None:
+                    return {"success": False, "error": "SAMConfiguration failed", "logs": logs}
+
+                self.rf_configuration(0x05, [0xFF, 0x01, 0x02], logs)
+
+                resp = self.in_list_passive_target(brty=0x00, timeout=3.0, logs=logs)
+                card = self._parse_14443a_target(resp)
+                if card is None:
+                    self.power_down(logs)
+                    return {"success": False, "error": "No card detected", "logs": logs}
+
+                card_info = {
+                    "uid": card.uid,
+                    "atqa": card.atqa,
+                    "sak": card.sak,
+                    "ats": card.ats if card.ats else None,
+                }
+
+                tg = 0x01
+
+                # SELECT Vault AID
+                select_apdu = bytes([0x00, 0xA4, 0x04, 0x00, len(vault_aid)]) + vault_aid + bytes([0x00])
+                sw1, sw2, _ = self._exchange_apdu(tg, select_apdu, logs)
+                if (sw1, sw2) != (0x90, 0x00):
+                    self.in_release(logs=logs)
+                    self.power_down(logs)
+                    return {"success": False, "error": f"SELECT rejected (SW={sw1:02x}{sw2:02x})", "card_info": card_info, "logs": logs}
+
+                # WRITE: 00 D0 00 <offset> <length> <data>
+                write_apdu = bytes([0x00, 0xD0, 0x00, write_offset & 0xFF, len(data_bytes)]) + data_bytes
+                sw1, sw2, _ = self._exchange_apdu(tg, write_apdu, logs)
+
+                self.in_release(logs=logs)
+                self.power_down(logs)
+
+                if (sw1, sw2) != (0x90, 0x00):
+                    return {"success": False, "error": f"WRITE failed (SW={sw1:02x}{sw2:02x})", "card_info": card_info, "logs": logs}
+
+                return {
+                    "success": True,
+                    "card_info": card_info,
+                    "bytes_written": len(data_bytes),
+                    "logs": logs,
+                }
+
+            except serial.SerialException as e:
+                return {"success": False, "error": f"Serial port error: {e}", "logs": logs}
+            except Exception as e:
+                return {"success": False, "error": str(e), "logs": logs}
+            finally:
+                self._close()
+
+    # -- NDEF Type 4 reader --
+
+    def _exchange_apdu(self, tg, apdu, logs, retries=1):
+        """
+        Send an APDU via InDataExchange.
+        Handles ISO-DEP CID framing leak (PN532-to-PN532 workaround)
+        and retries on short responses (e.g. HCE routing delay).
+        Returns (sw1, sw2, payload) or raises RuntimeError on failure.
+        """
+        for attempt in range(1 + retries):
+            resp = self.in_data_exchange(tg, apdu, timeout=2.0, logs=logs)
+            if resp is None or len(resp) < 3:
+                raise RuntimeError("No response from card")
+            status = resp[2]
+            if status != 0x00:
+                raise RuntimeError(f"InDataExchange error 0x{status:02x}")
+            data = resp[3:]
+            # Workaround: PN532 may leak raw ISO-DEP I-block when CID is present.
+            # PCB byte 0x0A/0x0B/0x08/0x09 = I-block with CID bit set (bit 3).
+            # Skip PCB + 1 CID byte to extract the actual APDU response.
+            if len(data) >= 3 and (data[0] & 0xE8) == 0x08:
+                data = data[2:]  # skip PCB + CID byte
+            if len(data) >= 2:
+                sw1, sw2 = data[-2], data[-1]
+                payload = data[:-2]
+                return sw1, sw2, payload
+            # Short response — retry after brief delay
+            if attempt < retries:
+                time.sleep(0.1)
+        raise RuntimeError(f"Response too short ({len(data)} bytes, data=0x{self._format_hex(data)})")
+
+    def read_ndef_tag(self):
+        """
+        Read NDEF message from a Type 4 Tag.
+        Follows NFC Forum Type 4 Tag Operation:
+          1. SELECT NDEF Tag Application (AID D2 76 00 00 85 01 01)
+          2. SELECT CC file (E103), READ CC to find NDEF file info
+          3. SELECT NDEF file, READ length prefix, READ message body
+        Returns dict with {success, card_info, ndef_records, raw_hex, logs}.
+        """
+        logs = []
+        ndef_aid = bytes([0xD2, 0x76, 0x00, 0x00, 0x85, 0x01, 0x01])
+
+        with self._lock:
+            try:
+                self._open()
+                self._wakeup(logs)
+
+                resp = self.sam_configuration(logs)
+                if resp is None:
+                    return {"success": False, "error": "SAMConfiguration failed", "logs": logs}
+
+                self.rf_configuration(0x05, [0xFF, 0x01, 0x02], logs)
+
+                # Detect card
+                resp = self.in_list_passive_target(brty=0x00, timeout=3.0, logs=logs)
+                card = self._parse_14443a_target(resp)
+                if card is None:
+                    self.power_down(logs)
+                    return {"success": False, "error": "No card detected", "logs": logs}
+
+                card_info = {
+                    "uid": card.uid,
+                    "atqa": card.atqa,
+                    "sak": card.sak,
+                    "ats": card.ats if card.ats else None,
+                }
+
+                tg = 0x01
+
+                # 1) SELECT NDEF Tag Application
+                select_aid = bytes([0x00, 0xA4, 0x04, 0x00, len(ndef_aid)]) + ndef_aid + bytes([0x00])
+                sw1, sw2, _ = self._exchange_apdu(tg, select_aid, logs)
+                if (sw1, sw2) != (0x90, 0x00):
+                    self.in_release(logs=logs)
+                    self.power_down(logs)
+                    return {"success": False, "error": f"SELECT NDEF AID failed (SW={sw1:02x}{sw2:02x})",
+                            "card_info": card_info, "logs": logs}
+
+                # 2) SELECT CC file (E103)
+                select_cc = bytes([0x00, 0xA4, 0x00, 0x0C, 0x02, 0xE1, 0x03])
+                sw1, sw2, _ = self._exchange_apdu(tg, select_cc, logs)
+                if (sw1, sw2) != (0x90, 0x00):
+                    self.in_release(logs=logs)
+                    self.power_down(logs)
+                    return {"success": False, "error": f"SELECT CC failed (SW={sw1:02x}{sw2:02x})",
+                            "card_info": card_info, "logs": logs}
+
+                # READ CC (15 bytes)
+                read_cc = bytes([0x00, 0xB0, 0x00, 0x00, 0x0F])
+                sw1, sw2, cc_data = self._exchange_apdu(tg, read_cc, logs)
+                if (sw1, sw2) != (0x90, 0x00) or len(cc_data) < 15:
+                    self.in_release(logs=logs)
+                    self.power_down(logs)
+                    return {"success": False, "error": "READ CC failed",
+                            "card_info": card_info, "logs": logs}
+
+                # Parse CC: bytes 9-10 = NDEF file ID, bytes 11-12 = max NDEF size
+                ndef_file_id_hi = cc_data[9]
+                ndef_file_id_lo = cc_data[10]
+                ndef_max_size = (cc_data[11] << 8) | cc_data[12]
+
+                # 3) SELECT NDEF file
+                select_ndef = bytes([0x00, 0xA4, 0x00, 0x0C, 0x02, ndef_file_id_hi, ndef_file_id_lo])
+                sw1, sw2, _ = self._exchange_apdu(tg, select_ndef, logs)
+                if (sw1, sw2) != (0x90, 0x00):
+                    self.in_release(logs=logs)
+                    self.power_down(logs)
+                    return {"success": False, "error": f"SELECT NDEF file failed (SW={sw1:02x}{sw2:02x})",
+                            "card_info": card_info, "logs": logs}
+
+                # READ first 2 bytes — NDEF message length
+                read_len = bytes([0x00, 0xB0, 0x00, 0x00, 0x02])
+                sw1, sw2, len_data = self._exchange_apdu(tg, read_len, logs)
+                if (sw1, sw2) != (0x90, 0x00) or len(len_data) < 2:
+                    self.in_release(logs=logs)
+                    self.power_down(logs)
+                    return {"success": False, "error": "READ NDEF length failed",
+                            "card_info": card_info, "logs": logs}
+
+                ndef_msg_len = (len_data[0] << 8) | len_data[1]
+                if ndef_msg_len == 0:
+                    self.in_release(logs=logs)
+                    self.power_down(logs)
+                    return {"success": True, "card_info": card_info,
+                            "ndef_records": [], "raw_hex": "", "logs": logs}
+
+                # READ NDEF message body (offset=2, chunked if needed)
+                ndef_bytes = b""
+                offset = 2
+                remaining = ndef_msg_len
+                max_read = 59  # typical MLe for Type 4 Tags
+                while remaining > 0:
+                    chunk_size = min(remaining, max_read)
+                    read_msg = bytes([0x00, 0xB0, (offset >> 8) & 0xFF, offset & 0xFF, chunk_size])
+                    sw1, sw2, chunk = self._exchange_apdu(tg, read_msg, logs)
+                    if (sw1, sw2) != (0x90, 0x00):
+                        break
+                    ndef_bytes += bytes(chunk)
+                    offset += len(chunk)
+                    remaining -= len(chunk)
+
+                self.in_release(logs=logs)
+                self.power_down(logs)
+
+                # Parse NDEF records
+                raw_hex = self._format_hex(ndef_bytes)
+                ndef_records = []
+                try:
+                    import ndef as ndef_lib
+                    for record in ndef_lib.message_decoder(ndef_bytes):
+                        rec_info = {"type": record.type, "tnf": record._type_name_format}
+                        if hasattr(record, 'uri'):
+                            rec_info["value"] = record.uri
+                        elif hasattr(record, 'text'):
+                            rec_info["value"] = record.text
+                        else:
+                            rec_info["value"] = self._format_hex(record.data) if hasattr(record, 'data') else str(record)
+                        ndef_records.append(rec_info)
+                except Exception:
+                    ndef_records = [{"type": "raw", "value": raw_hex}]
+
+                return {
+                    "success": True,
+                    "card_info": card_info,
+                    "ndef_records": ndef_records,
+                    "raw_hex": raw_hex,
+                    "logs": logs,
+                }
+
+            except RuntimeError as e:
+                return {"success": False, "error": str(e), "card_info": card_info if 'card_info' in dir() else None, "logs": logs}
+            except serial.SerialException as e:
+                return {"success": False, "error": f"Serial port error: {e}", "logs": logs}
+            except Exception as e:
+                return {"success": False, "error": str(e), "logs": logs}
+            finally:
+                self._close()
+
+    def write_ndef_tag(self, ndef_msg_bytes):
+        """
+        Write an NDEF message to a Type 4 Tag.
+        Follows NFC Forum Type 4 Tag Operation:
+          1. SELECT NDEF Tag Application
+          2. SELECT CC, READ CC to check write access and max size
+          3. SELECT NDEF file
+          4. UPDATE BINARY: set length to 0 (mark empty during write)
+          5. UPDATE BINARY: write NDEF message body (chunked)
+          6. UPDATE BINARY: set actual length
+        Returns dict with {success, card_info, logs}.
+        """
+        logs = []
+        ndef_aid = bytes([0xD2, 0x76, 0x00, 0x00, 0x85, 0x01, 0x01])
+
+        with self._lock:
+            try:
+                self._open()
+                self._wakeup(logs)
+
+                resp = self.sam_configuration(logs)
+                if resp is None:
+                    return {"success": False, "error": "SAMConfiguration failed", "logs": logs}
+
+                self.rf_configuration(0x05, [0xFF, 0x01, 0x02], logs)
+
+                resp = self.in_list_passive_target(brty=0x00, timeout=3.0, logs=logs)
+                card = self._parse_14443a_target(resp)
+                if card is None:
+                    self.power_down(logs)
+                    return {"success": False, "error": "No card detected", "logs": logs}
+
+                card_info = {
+                    "uid": card.uid,
+                    "atqa": card.atqa,
+                    "sak": card.sak,
+                    "ats": card.ats if card.ats else None,
+                }
+
+                tg = 0x01
+
+                # 1) SELECT NDEF Tag Application
+                select_aid = bytes([0x00, 0xA4, 0x04, 0x00, len(ndef_aid)]) + ndef_aid + bytes([0x00])
+                sw1, sw2, _ = self._exchange_apdu(tg, select_aid, logs)
+                if (sw1, sw2) != (0x90, 0x00):
+                    self.in_release(logs=logs)
+                    self.power_down(logs)
+                    return {"success": False, "error": f"SELECT NDEF AID failed (SW={sw1:02x}{sw2:02x})",
+                            "card_info": card_info, "logs": logs}
+
+                # 2) SELECT CC file (E103), READ CC
+                select_cc = bytes([0x00, 0xA4, 0x00, 0x0C, 0x02, 0xE1, 0x03])
+                sw1, sw2, _ = self._exchange_apdu(tg, select_cc, logs)
+                if (sw1, sw2) != (0x90, 0x00):
+                    self.in_release(logs=logs)
+                    self.power_down(logs)
+                    return {"success": False, "error": f"SELECT CC failed (SW={sw1:02x}{sw2:02x})",
+                            "card_info": card_info, "logs": logs}
+
+                read_cc = bytes([0x00, 0xB0, 0x00, 0x00, 0x0F])
+                sw1, sw2, cc_data = self._exchange_apdu(tg, read_cc, logs)
+                if (sw1, sw2) != (0x90, 0x00) or len(cc_data) < 15:
+                    self.in_release(logs=logs)
+                    self.power_down(logs)
+                    return {"success": False, "error": "READ CC failed",
+                            "card_info": card_info, "logs": logs}
+
+                # Parse CC
+                ndef_file_id_hi = cc_data[9]
+                ndef_file_id_lo = cc_data[10]
+                ndef_max_size = (cc_data[11] << 8) | cc_data[12]
+                write_access = cc_data[14]
+
+                if write_access != 0x00:
+                    self.in_release(logs=logs)
+                    self.power_down(logs)
+                    return {"success": False, "error": f"Write access denied (0x{write_access:02x})",
+                            "card_info": card_info, "logs": logs}
+
+                # NDEF file = 2-byte length prefix + message body
+                ndef_file_content = struct.pack(">H", len(ndef_msg_bytes)) + ndef_msg_bytes
+                if len(ndef_file_content) > ndef_max_size:
+                    self.in_release(logs=logs)
+                    self.power_down(logs)
+                    return {"success": False, "error": f"Message too large ({len(ndef_msg_bytes)} bytes, max {ndef_max_size - 2})",
+                            "card_info": card_info, "logs": logs}
+
+                # 3) SELECT NDEF file
+                select_ndef = bytes([0x00, 0xA4, 0x00, 0x0C, 0x02, ndef_file_id_hi, ndef_file_id_lo])
+                sw1, sw2, _ = self._exchange_apdu(tg, select_ndef, logs)
+                if (sw1, sw2) != (0x90, 0x00):
+                    self.in_release(logs=logs)
+                    self.power_down(logs)
+                    return {"success": False, "error": f"SELECT NDEF file failed (SW={sw1:02x}{sw2:02x})",
+                            "card_info": card_info, "logs": logs}
+
+                # 4) UPDATE BINARY: write length = 0 (mark empty during write)
+                update_zero = bytes([0x00, 0xD6, 0x00, 0x00, 0x02, 0x00, 0x00])
+                sw1, sw2, _ = self._exchange_apdu(tg, update_zero, logs)
+                if (sw1, sw2) != (0x90, 0x00):
+                    self.in_release(logs=logs)
+                    self.power_down(logs)
+                    return {"success": False, "error": f"UPDATE BINARY (reset length) failed (SW={sw1:02x}{sw2:02x})",
+                            "card_info": card_info, "logs": logs}
+
+                # 5) UPDATE BINARY: write NDEF message body (offset=2, chunked)
+                mlc = (cc_data[5] << 8) | cc_data[6]  # max write size from CC
+                max_write = min(mlc, 52)  # conservative chunk size
+                offset = 2
+                remaining_data = ndef_msg_bytes
+                while remaining_data:
+                    chunk = remaining_data[:max_write]
+                    remaining_data = remaining_data[max_write:]
+                    update_cmd = bytes([0x00, 0xD6, (offset >> 8) & 0xFF, offset & 0xFF, len(chunk)]) + chunk
+                    sw1, sw2, _ = self._exchange_apdu(tg, update_cmd, logs)
+                    if (sw1, sw2) != (0x90, 0x00):
+                        self.in_release(logs=logs)
+                        self.power_down(logs)
+                        return {"success": False, "error": f"UPDATE BINARY (data) failed at offset {offset} (SW={sw1:02x}{sw2:02x})",
+                                "card_info": card_info, "logs": logs}
+                    offset += len(chunk)
+
+                # 6) UPDATE BINARY: write actual NDEF message length
+                len_bytes = struct.pack(">H", len(ndef_msg_bytes))
+                update_len = bytes([0x00, 0xD6, 0x00, 0x00, 0x02]) + len_bytes
+                sw1, sw2, _ = self._exchange_apdu(tg, update_len, logs)
+
+                self.in_release(logs=logs)
+                self.power_down(logs)
+
+                if (sw1, sw2) != (0x90, 0x00):
+                    return {"success": False, "error": f"UPDATE BINARY (set length) failed (SW={sw1:02x}{sw2:02x})",
+                            "card_info": card_info, "logs": logs}
+
+                return {
+                    "success": True,
+                    "card_info": card_info,
+                    "bytes_written": len(ndef_msg_bytes),
+                    "logs": logs,
+                }
+
+            except RuntimeError as e:
+                return {"success": False, "error": str(e), "card_info": card_info if 'card_info' in dir() else None, "logs": logs}
+            except serial.SerialException as e:
+                return {"success": False, "error": f"Serial port error: {e}", "logs": logs}
+            except Exception as e:
+                return {"success": False, "error": str(e), "logs": logs}
+            finally:
+                self._close()
+
     # -- Type 4 Tag emulation --
 
     def emulate_tag(self, emulator, stop_event, logs):
@@ -443,11 +934,16 @@ class PN532:
                         continue
 
                     # Activated — handle APDU exchange loop
+                    consecutive_timeouts = 0
                     while not stop_event.is_set():
                         resp = self.tg_get_data(timeout=2.0, logs=logs)
                         if resp is None:
-                            # Timeout waiting for data, re-check stop
+                            consecutive_timeouts += 1
+                            if consecutive_timeouts >= 3:
+                                # Reader likely disconnected, re-init as target
+                                break
                             continue
+                        consecutive_timeouts = 0
 
                         # resp: D5 87 Status [DataIn...]
                         if len(resp) < 3:
@@ -576,14 +1072,14 @@ class Type4TagEmulator:
         return chunk + bytes([0x90, 0x00])
 
 
-class CustomTagEmulator:
+class VaultTagEmulator:
     """
-    Custom APDU protocol emulator with a flat read/write data buffer.
+    Vault APDU protocol emulator with a flat read/write data buffer.
 
-    Supports SELECT (by custom AID), READ BINARY, and WRITE (INS=0xD0).
+    Supports SELECT (by Vault AID), READ BINARY, and WRITE (INS=0xD0).
     """
 
-    CUSTOM_AID = bytes([0xF0, 0x01, 0x02, 0x03, 0x04, 0x05])
+    VAULT_AID = bytes([0xF0, 0x01, 0x02, 0x03, 0x04, 0x05])
     BUFFER_SIZE = 256
 
     def __init__(self, initial_data=b""):
@@ -602,13 +1098,13 @@ class CustomTagEmulator:
             return self._handle_select(apdu)
         elif ins == 0xB0:  # READ BINARY
             return self._handle_read(apdu)
-        elif ins == 0xD0:  # WRITE (custom)
+        elif ins == 0xD0:  # WRITE (Vault)
             return self._handle_write(apdu)
         else:
             return bytes([0x6D, 0x00])  # INS not supported
 
     def _handle_select(self, apdu):
-        """Handle SELECT command — match custom AID."""
+        """Handle SELECT command — match Vault AID."""
         if len(apdu) < 5:
             return bytes([0x6A, 0x82])
 
@@ -616,7 +1112,7 @@ class CustomTagEmulator:
         lc = apdu[4]
         data = apdu[5:5 + lc]
 
-        if p1 == 0x04 and data == self.CUSTOM_AID:
+        if p1 == 0x04 and data == self.VAULT_AID:
             self._selected = True
             return bytes([0x90, 0x00])
 

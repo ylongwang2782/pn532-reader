@@ -521,8 +521,10 @@
         <h1>PN532 NFC Reader</h1>
 
         <div class="tabs">
-            <div class="tab active" onclick="switchTab('read')">Read Card</div>
-            <div class="tab" onclick="switchTab('emulate')">Emulate Tag</div>
+            <div class="tab active" data-tab="read" onclick="switchTab('read')">Read Card</div>
+            <div class="tab" data-tab="emulate" onclick="switchTab('emulate')">Emulate Tag</div>
+            <div class="tab" data-tab="vault-reader" onclick="switchTab('vault-reader')">Vault Reader</div>
+            <div class="tab" data-tab="ndef-reader" onclick="switchTab('ndef-reader')">NDEF Reader</div>
         </div>
 
         <!-- Read Tab -->
@@ -562,10 +564,19 @@
 
             <div class="emulate-form">
                 <div class="form-group">
-                    <label for="ndefType">NDEF Type</label>
+                    <label for="ndefType">Emulation Mode</label>
                     <select id="ndefType" onchange="updatePlaceholder()">
                         <option value="url">URL</option>
                         <option value="text">Text</option>
+                        <option value="vault">Vault Protocol</option>
+                    </select>
+                </div>
+
+                <div class="form-group" id="formatGroup" style="display:none">
+                    <label for="inputFormat">Input Format</label>
+                    <select id="inputFormat">
+                        <option value="text">Text (UTF-8)</option>
+                        <option value="hex">Hex (e.g. 48 65 6C 6C 6F)</option>
                     </select>
                 </div>
 
@@ -602,6 +613,123 @@
                 </div>
             </div>
         </div>
+
+        <!-- Vault Reader Tab -->
+        <div id="vaultReaderTab" class="tab-content">
+            <div class="emulate-form">
+                <div class="form-group" style="display:flex; gap:20px;">
+                    <div style="flex:1">
+                        <label for="vaultOffset">Offset</label>
+                        <input type="number" id="vaultOffset" value="0" min="0" max="255">
+                    </div>
+                    <div style="flex:1">
+                        <label for="vaultLength">Length</label>
+                        <input type="number" id="vaultLength" value="64" min="1" max="255">
+                    </div>
+                </div>
+            </div>
+
+            <div class="btn-container">
+                <button class="scan-btn" id="vaultReadBtn" onclick="readVaultTag()">
+                    Read
+                </button>
+            </div>
+
+            <div class="emulate-form" style="margin-top:20px">
+                <div class="form-group" style="display:flex; gap:20px;">
+                    <div style="flex:1">
+                        <label for="vaultWriteOffset">Write Offset</label>
+                        <input type="number" id="vaultWriteOffset" value="0" min="0" max="255">
+                    </div>
+                    <div style="flex:1">
+                        <label for="vaultWriteFormat">Format</label>
+                        <select id="vaultWriteFormat">
+                            <option value="text">Text (UTF-8)</option>
+                            <option value="hex">Hex (e.g. 48 65 6C 6C 6F)</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label for="vaultWriteContent">Write Data</label>
+                    <textarea id="vaultWriteContent" placeholder="Data to write to card buffer"></textarea>
+                </div>
+            </div>
+
+            <div class="btn-container">
+                <button class="scan-btn" id="vaultWriteBtn" onclick="writeVaultTag()" style="background: linear-gradient(135deg, #ff9500 0%, #e67700 100%); box-shadow: 0 4px 15px rgba(255, 149, 0, 0.3);">
+                    Write
+                </button>
+            </div>
+
+            <div class="status" id="vaultStatus">Place a card on the reader</div>
+
+            <div id="vaultResult"></div>
+
+            <!-- Log Panel for Vault Reader -->
+            <div class="log-panel" id="vaultLogPanel">
+                <div class="log-header">
+                    <h3>Communication Log</h3>
+                    <div class="log-controls">
+                        <button class="clear-btn" onclick="exportLogs('vault')">Export CSV</button>
+                        <button class="clear-btn" onclick="clearVaultLogs()">Clear</button>
+                        <span class="log-count" id="vaultLogCount">0 entries</span>
+                    </div>
+                </div>
+                <div class="log-content" id="vaultLogContent">
+                    <div class="log-empty">No communication logs yet</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- NDEF Reader Tab -->
+        <div id="ndefReaderTab" class="tab-content">
+            <div class="btn-container">
+                <button class="scan-btn" id="ndefReadBtn" onclick="readNdefTag()">
+                    Read NDEF
+                </button>
+            </div>
+
+            <div class="emulate-form" style="margin-top:20px">
+                <div class="form-group" style="display:flex; gap:20px;">
+                    <div style="flex:1">
+                        <label for="ndefWriteType">Type</label>
+                        <select id="ndefWriteType" onchange="updateNdefWritePlaceholder()">
+                            <option value="url">URL</option>
+                            <option value="text">Text</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label for="ndefWriteContent">Content</label>
+                    <textarea id="ndefWriteContent" placeholder="https://example.com"></textarea>
+                </div>
+            </div>
+
+            <div class="btn-container">
+                <button class="scan-btn" id="ndefWriteBtn" onclick="writeNdefTag()" style="background: linear-gradient(135deg, #ff9500 0%, #e67700 100%); box-shadow: 0 4px 15px rgba(255, 149, 0, 0.3);">
+                    Write NDEF
+                </button>
+            </div>
+
+            <div class="status" id="ndefStatus">Place a Type 4 Tag on the reader</div>
+
+            <div id="ndefResult"></div>
+
+            <!-- Log Panel for NDEF Reader -->
+            <div class="log-panel" id="ndefLogPanel">
+                <div class="log-header">
+                    <h3>Communication Log</h3>
+                    <div class="log-controls">
+                        <button class="clear-btn" onclick="exportLogs('ndef')">Export CSV</button>
+                        <button class="clear-btn" onclick="clearNdefLogs()">Clear</button>
+                        <span class="log-count" id="ndefLogCount">0 entries</span>
+                    </div>
+                </div>
+                <div class="log-content" id="ndefLogContent">
+                    <div class="log-empty">No communication logs yet</div>
+                </div>
+            </div>
+        </div>
     </div>
 
     <script>
@@ -619,6 +747,7 @@
             0x14: 'SAMConfiguration',
             0x16: 'PowerDown',
             0x32: 'RFConfiguration',
+            0x40: 'InDataExchange',
             0x42: 'InCommunicateThru',
             0x44: 'InRelease',
             0x4A: 'InListPassiveTarget',
@@ -762,24 +891,36 @@
             document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
             document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
 
+            document.querySelector(`.tab[data-tab="${tab}"]`).classList.add('active');
+
             if (tab === 'read') {
-                document.querySelector('.tab:first-child').classList.add('active');
                 document.getElementById('readTab').classList.add('active');
                 stopLogPolling();
-            } else {
-                document.querySelector('.tab:last-child').classList.add('active');
+            } else if (tab === 'emulate') {
                 document.getElementById('emulateTab').classList.add('active');
                 checkEmulationStatus();
+            } else if (tab === 'vault-reader') {
+                document.getElementById('vaultReaderTab').classList.add('active');
+                stopLogPolling();
+            } else if (tab === 'ndef-reader') {
+                document.getElementById('ndefReaderTab').classList.add('active');
+                stopLogPolling();
             }
         }
 
         function updatePlaceholder() {
             const type = document.getElementById('ndefType').value;
             const content = document.getElementById('ndefContent');
+            const formatGroup = document.getElementById('formatGroup');
             if (type === 'url') {
                 content.placeholder = 'https://example.com';
-            } else {
+                formatGroup.style.display = 'none';
+            } else if (type === 'text') {
                 content.placeholder = 'Hello, NFC!';
+                formatGroup.style.display = 'none';
+            } else if (type === 'vault') {
+                content.placeholder = 'Initial buffer data (or leave empty)';
+                formatGroup.style.display = '';
             }
         }
 
@@ -962,7 +1103,10 @@
                 btn.textContent = 'Stop Emulation';
                 btn.classList.add('stop');
                 indicator.classList.add('running');
-                statusText.textContent = 'Emulating Type 4 Tag...';
+                const mode = document.getElementById('ndefType').value;
+                statusText.textContent = mode === 'vault'
+                    ? 'Emulating Vault Protocol...'
+                    : 'Emulating Type 4 Tag...';
                 statusBox.classList.add('running');
             } else {
                 btn.textContent = 'Start Emulation';
@@ -1016,7 +1160,7 @@
         }
 
         function exportLogs(type) {
-            const containerId = type === 'read' ? 'readLogContent' : 'emulateLogContent';
+            const containerId = type === 'read' ? 'readLogContent' : type === 'vault' ? 'vaultLogContent' : type === 'ndef' ? 'ndefLogContent' : 'emulateLogContent';
             const container = document.getElementById(containerId);
             const entries = container.querySelectorAll('.log-entry');
 
@@ -1077,7 +1221,7 @@
                 const ndefType = document.getElementById('ndefType').value;
                 const content = document.getElementById('ndefContent').value.trim();
 
-                if (!content) {
+                if (!content && ndefType !== 'vault') {
                     status.className = 'status error';
                     status.textContent = 'Please enter content';
                     btn.disabled = false;
@@ -1091,7 +1235,11 @@
                     const response = await fetch('/api/emulate/start', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ type: ndefType, content: content })
+                        body: JSON.stringify({
+                            type: ndefType,
+                            content: content,
+                            format: document.getElementById('inputFormat').value
+                        })
                     });
                     const data = await response.json();
 
@@ -1111,6 +1259,434 @@
             }
 
             btn.disabled = false;
+        }
+
+        async function readVaultTag() {
+            const btn = document.getElementById('vaultReadBtn');
+            const status = document.getElementById('vaultStatus');
+            const resultContainer = document.getElementById('vaultResult');
+
+            const offset = parseInt(document.getElementById('vaultOffset').value) || 0;
+            const length = parseInt(document.getElementById('vaultLength').value) || 64;
+
+            btn.disabled = true;
+            btn.textContent = 'Reading...';
+            btn.classList.add('scanning-animation');
+            status.className = 'status scanning';
+            status.textContent = 'Reading Vault tag...';
+            resultContainer.innerHTML = '';
+
+            try {
+                const response = await fetch(`/api/read-vault?offset=${offset}&length=${length}`);
+                const data = await response.json();
+
+                if (data.success) {
+                    status.className = 'status success';
+                    status.textContent = 'Read successful';
+
+                    const ci = data.card_info || {};
+                    resultContainer.innerHTML = `
+                        <div class="card">
+                            <div class="card-header">
+                                <div class="card-icon">📡</div>
+                                <div>
+                                    <div class="card-title">Vault Protocol Card</div>
+                                    <div class="card-subtitle">AID: F0 01 02 03 04 05</div>
+                                </div>
+                            </div>
+                            <div class="card-info">
+                                <div class="info-item">
+                                    <div class="info-label">UID</div>
+                                    <div class="info-value uid-value">${ci.uid || 'N/A'}</div>
+                                </div>
+                                <div class="info-item">
+                                    <div class="info-label">ATQA</div>
+                                    <div class="info-value">${ci.atqa || 'N/A'}</div>
+                                </div>
+                                <div class="info-item">
+                                    <div class="info-label">SAK</div>
+                                    <div class="info-value">${ci.sak || 'N/A'}</div>
+                                </div>
+                                ${ci.ats ? `
+                                <div class="info-item">
+                                    <div class="info-label">ATS</div>
+                                    <div class="info-value">${ci.ats}</div>
+                                </div>` : ''}
+                            </div>
+                        </div>
+                        <div class="card" style="margin-top:20px">
+                            <div class="card-header">
+                                <div class="card-icon">📄</div>
+                                <div>
+                                    <div class="card-title">Buffer Data</div>
+                                    <div class="card-subtitle">Offset ${offset}, Length ${length}</div>
+                                </div>
+                            </div>
+                            <div class="card-info">
+                                <div class="info-item" style="grid-column: 1 / -1">
+                                    <div class="info-label">HEX</div>
+                                    <div class="info-value">${data.data_hex || '(empty)'}</div>
+                                </div>
+                                <div class="info-item" style="grid-column: 1 / -1">
+                                    <div class="info-label">TEXT</div>
+                                    <div class="info-value">${data.data_text || '(empty)'}</div>
+                                </div>
+                            </div>
+                        </div>
+                    `;
+                } else {
+                    status.className = 'status error';
+                    status.textContent = `Error: ${data.error}`;
+
+                    if (data.card_info) {
+                        const ci = data.card_info;
+                        resultContainer.innerHTML = `
+                            <div class="card">
+                                <div class="card-header">
+                                    <div class="card-icon">💳</div>
+                                    <div>
+                                        <div class="card-title">Card Detected (protocol failed)</div>
+                                    </div>
+                                </div>
+                                <div class="card-info">
+                                    <div class="info-item">
+                                        <div class="info-label">UID</div>
+                                        <div class="info-value uid-value">${ci.uid || 'N/A'}</div>
+                                    </div>
+                                    <div class="info-item">
+                                        <div class="info-label">ATQA</div>
+                                        <div class="info-value">${ci.atqa || 'N/A'}</div>
+                                    </div>
+                                    <div class="info-item">
+                                        <div class="info-label">SAK</div>
+                                        <div class="info-value">${ci.sak || 'N/A'}</div>
+                                    </div>
+                                </div>
+                            </div>
+                        `;
+                    }
+                }
+
+                if (data.logs) {
+                    renderLogs(data.logs, 'vaultLogContent', 'vaultLogCount');
+                }
+
+            } catch (error) {
+                status.className = 'status error';
+                status.textContent = `Connection error: ${error.message}`;
+            } finally {
+                btn.disabled = false;
+                btn.textContent = 'Read';
+                btn.classList.remove('scanning-animation');
+            }
+        }
+
+        function clearVaultLogs() {
+            document.getElementById('vaultLogContent').innerHTML =
+                '<div class="log-empty">Logs cleared</div>';
+            document.getElementById('vaultLogCount').textContent = '0 entries';
+        }
+
+        async function readNdefTag() {
+            const btn = document.getElementById('ndefReadBtn');
+            const status = document.getElementById('ndefStatus');
+            const resultContainer = document.getElementById('ndefResult');
+
+            btn.disabled = true;
+            btn.textContent = 'Reading...';
+            btn.classList.add('scanning-animation');
+            status.className = 'status scanning';
+            status.textContent = 'Reading NDEF tag...';
+            resultContainer.innerHTML = '';
+
+            try {
+                const response = await fetch('/api/read-ndef');
+                const data = await response.json();
+
+                if (data.success) {
+                    const ci = data.card_info || {};
+                    const records = data.ndef_records || [];
+
+                    if (records.length === 0) {
+                        status.className = 'status';
+                        status.textContent = 'Tag found but NDEF message is empty';
+                    } else {
+                        status.className = 'status success';
+                        status.textContent = `Read ${records.length} NDEF record(s)`;
+                    }
+
+                    let recordsHtml = records.map((rec, i) => `
+                        <div class="info-item" style="grid-column: 1 / -1">
+                            <div class="info-label">Record ${i + 1} — ${rec.type || 'unknown'}</div>
+                            <div class="info-value">${rec.value || '(empty)'}</div>
+                        </div>
+                    `).join('');
+
+                    resultContainer.innerHTML = `
+                        <div class="card">
+                            <div class="card-header">
+                                <div class="card-icon">💳</div>
+                                <div>
+                                    <div class="card-title">Type 4 Tag</div>
+                                    <div class="card-subtitle">NDEF Application</div>
+                                </div>
+                            </div>
+                            <div class="card-info">
+                                <div class="info-item">
+                                    <div class="info-label">UID</div>
+                                    <div class="info-value uid-value">${ci.uid || 'N/A'}</div>
+                                </div>
+                                <div class="info-item">
+                                    <div class="info-label">ATQA</div>
+                                    <div class="info-value">${ci.atqa || 'N/A'}</div>
+                                </div>
+                                <div class="info-item">
+                                    <div class="info-label">SAK</div>
+                                    <div class="info-value">${ci.sak || 'N/A'}</div>
+                                </div>
+                                ${ci.ats ? `
+                                <div class="info-item">
+                                    <div class="info-label">ATS</div>
+                                    <div class="info-value">${ci.ats}</div>
+                                </div>` : ''}
+                            </div>
+                        </div>
+                        <div class="card" style="margin-top:20px">
+                            <div class="card-header">
+                                <div class="card-icon">📄</div>
+                                <div>
+                                    <div class="card-title">NDEF Message</div>
+                                    <div class="card-subtitle">${records.length} record(s)</div>
+                                </div>
+                            </div>
+                            <div class="card-info">
+                                ${recordsHtml}
+                                ${data.raw_hex ? `
+                                <div class="info-item" style="grid-column: 1 / -1">
+                                    <div class="info-label">RAW HEX</div>
+                                    <div class="info-value">${data.raw_hex}</div>
+                                </div>` : ''}
+                            </div>
+                        </div>
+                    `;
+                } else {
+                    status.className = 'status error';
+                    status.textContent = `Error: ${data.error}`;
+
+                    if (data.card_info) {
+                        const ci = data.card_info;
+                        resultContainer.innerHTML = `
+                            <div class="card">
+                                <div class="card-header">
+                                    <div class="card-icon">💳</div>
+                                    <div>
+                                        <div class="card-title">Card Detected (NDEF read failed)</div>
+                                    </div>
+                                </div>
+                                <div class="card-info">
+                                    <div class="info-item">
+                                        <div class="info-label">UID</div>
+                                        <div class="info-value uid-value">${ci.uid || 'N/A'}</div>
+                                    </div>
+                                    <div class="info-item">
+                                        <div class="info-label">ATQA</div>
+                                        <div class="info-value">${ci.atqa || 'N/A'}</div>
+                                    </div>
+                                    <div class="info-item">
+                                        <div class="info-label">SAK</div>
+                                        <div class="info-value">${ci.sak || 'N/A'}</div>
+                                    </div>
+                                </div>
+                            </div>
+                        `;
+                    }
+                }
+
+                if (data.logs) {
+                    renderLogs(data.logs, 'ndefLogContent', 'ndefLogCount');
+                }
+
+            } catch (error) {
+                status.className = 'status error';
+                status.textContent = `Connection error: ${error.message}`;
+            } finally {
+                btn.disabled = false;
+                btn.textContent = 'Read NDEF';
+                btn.classList.remove('scanning-animation');
+            }
+        }
+
+        async function writeVaultTag() {
+            const btn = document.getElementById('vaultWriteBtn');
+            const status = document.getElementById('vaultStatus');
+            const resultContainer = document.getElementById('vaultResult');
+
+            const offset = parseInt(document.getElementById('vaultWriteOffset').value) || 0;
+            const content = document.getElementById('vaultWriteContent').value.trim();
+            const fmt = document.getElementById('vaultWriteFormat').value;
+
+            if (!content) {
+                status.className = 'status error';
+                status.textContent = 'Please enter data to write';
+                return;
+            }
+
+            btn.disabled = true;
+            btn.textContent = 'Writing...';
+            btn.classList.add('scanning-animation');
+            status.className = 'status scanning';
+            status.textContent = 'Writing to Vault tag...';
+            resultContainer.innerHTML = '';
+
+            try {
+                const response = await fetch('/api/write-vault', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ offset, content, format: fmt })
+                });
+                const data = await response.json();
+
+                if (data.success) {
+                    status.className = 'status success';
+                    status.textContent = `Write successful (${data.bytes_written || 0} bytes)`;
+
+                    const ci = data.card_info || {};
+                    resultContainer.innerHTML = `
+                        <div class="card">
+                            <div class="card-header">
+                                <div class="card-icon">📡</div>
+                                <div>
+                                    <div class="card-title">Vault Protocol Card</div>
+                                    <div class="card-subtitle">Write OK</div>
+                                </div>
+                            </div>
+                            <div class="card-info">
+                                <div class="info-item">
+                                    <div class="info-label">UID</div>
+                                    <div class="info-value uid-value">${ci.uid || 'N/A'}</div>
+                                </div>
+                                <div class="info-item">
+                                    <div class="info-label">Bytes Written</div>
+                                    <div class="info-value">${data.bytes_written || 0}</div>
+                                </div>
+                                <div class="info-item">
+                                    <div class="info-label">Offset</div>
+                                    <div class="info-value">${offset}</div>
+                                </div>
+                            </div>
+                        </div>
+                    `;
+                } else {
+                    status.className = 'status error';
+                    status.textContent = `Error: ${data.error}`;
+                }
+
+                if (data.logs) {
+                    renderLogs(data.logs, 'vaultLogContent', 'vaultLogCount');
+                }
+
+            } catch (error) {
+                status.className = 'status error';
+                status.textContent = `Connection error: ${error.message}`;
+            } finally {
+                btn.disabled = false;
+                btn.textContent = 'Write';
+                btn.classList.remove('scanning-animation');
+            }
+        }
+
+        function updateNdefWritePlaceholder() {
+            const type = document.getElementById('ndefWriteType').value;
+            const content = document.getElementById('ndefWriteContent');
+            if (type === 'url') {
+                content.placeholder = 'https://example.com';
+            } else {
+                content.placeholder = 'Hello, NFC!';
+            }
+        }
+
+        async function writeNdefTag() {
+            const btn = document.getElementById('ndefWriteBtn');
+            const status = document.getElementById('ndefStatus');
+            const resultContainer = document.getElementById('ndefResult');
+
+            const ndefType = document.getElementById('ndefWriteType').value;
+            const content = document.getElementById('ndefWriteContent').value.trim();
+
+            if (!content) {
+                status.className = 'status error';
+                status.textContent = 'Please enter content to write';
+                return;
+            }
+
+            btn.disabled = true;
+            btn.textContent = 'Writing...';
+            btn.classList.add('scanning-animation');
+            status.className = 'status scanning';
+            status.textContent = 'Writing NDEF to tag...';
+            resultContainer.innerHTML = '';
+
+            try {
+                const response = await fetch('/api/write-ndef', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ type: ndefType, content })
+                });
+                const data = await response.json();
+
+                if (data.success) {
+                    status.className = 'status success';
+                    status.textContent = `NDEF write successful (${data.bytes_written || 0} bytes)`;
+
+                    const ci = data.card_info || {};
+                    resultContainer.innerHTML = `
+                        <div class="card">
+                            <div class="card-header">
+                                <div class="card-icon">💳</div>
+                                <div>
+                                    <div class="card-title">Type 4 Tag</div>
+                                    <div class="card-subtitle">NDEF Write OK</div>
+                                </div>
+                            </div>
+                            <div class="card-info">
+                                <div class="info-item">
+                                    <div class="info-label">UID</div>
+                                    <div class="info-value uid-value">${ci.uid || 'N/A'}</div>
+                                </div>
+                                <div class="info-item">
+                                    <div class="info-label">Bytes Written</div>
+                                    <div class="info-value">${data.bytes_written || 0}</div>
+                                </div>
+                                <div class="info-item">
+                                    <div class="info-label">Type</div>
+                                    <div class="info-value">${ndefType.toUpperCase()}</div>
+                                </div>
+                            </div>
+                        </div>
+                    `;
+                } else {
+                    status.className = 'status error';
+                    status.textContent = `Error: ${data.error}`;
+                }
+
+                if (data.logs) {
+                    renderLogs(data.logs, 'ndefLogContent', 'ndefLogCount');
+                }
+
+            } catch (error) {
+                status.className = 'status error';
+                status.textContent = `Connection error: ${error.message}`;
+            } finally {
+                btn.disabled = false;
+                btn.textContent = 'Write NDEF';
+                btn.classList.remove('scanning-animation');
+            }
+        }
+
+        function clearNdefLogs() {
+            document.getElementById('ndefLogContent').innerHTML =
+                '<div class="log-empty">Logs cleared</div>';
+            document.getElementById('ndefLogCount').textContent = '0 entries';
         }
 
         // Auto-scan on page load

@@ -74,6 +74,93 @@ Commands are sent with TFI=`D4`. Responses use TFI=`D5` with response code = com
 
 A complete libnfc-driven PN532 NFC card scan flow (348 lines of communication records).
 
+### Sequence Diagram
+
+```mermaid
+sequenceDiagram
+    participant Host as Host (libnfc)
+    participant PN532
+    participant Card as NFC Card
+
+    rect rgb(40, 40, 80)
+    Note over Host, PN532: 1. Initialization
+    Host->>PN532: Wakeup Preamble (55 55 00 ...)
+    Host->>PN532: SAMConfiguration (0x14) mode=Normal
+    PN532-->>Host: ACK + Response OK
+    Host->>PN532: Diagnose (0x00) "libnfc"
+    PN532-->>Host: ACK + Echo "libnfc"
+    Host->>PN532: GetFirmwareVersion (0x02)
+    PN532-->>Host: ACK + v1.6 (IC=PN532, ISO14443A/B+ISO18092)
+    Host->>PN532: SetParameters (0x12) 0x14
+    PN532-->>Host: ACK + Response OK
+    end
+
+    rect rgb(40, 60, 40)
+    Note over Host, PN532: 2. RF Configuration
+    Host->>PN532: ReadRegister (0x06) CIU regs ×5
+    PN532-->>Host: ACK + Register values
+    Host->>PN532: WriteRegister (0x08) TxMode/RxMode=0x80
+    PN532-->>Host: ACK + Response OK
+    Host->>PN532: RFConfiguration (0x32) RF field OFF
+    PN532-->>Host: ACK + Response OK
+    Host->>PN532: RFConfiguration (0x32) RF field ON
+    PN532-->>Host: ACK + Response OK
+    Host->>PN532: RFConfiguration (0x32) MaxRetries=FF FF FF
+    PN532-->>Host: ACK + Response OK
+    Host->>PN532: ReadRegister + WriteRegister (fine-tune CIU)
+    PN532-->>Host: ACK + Response OK
+    Host->>PN532: RFConfiguration (0x32) MaxRetries=00 01 02
+    PN532-->>Host: ACK + Response OK
+    end
+
+    rect rgb(60, 40, 20)
+    Note over Host, Card: 3. Card Polling — ISO 14443A
+    Host->>PN532: InListPassiveTarget (0x4A) BrTy=0x00 (106kbps Type A)
+    PN532->>Card: REQA / WUPA
+    Card-->>PN532: ATQA=00 02, SAK=20, UID=7B 9A DC E3
+    PN532-->>Host: ACK + 1 target found (ATQA+SAK+UID+ATS)
+    Note right of Card: Card detected!<br/>ATS: 05 78 80 B8 02
+    Host->>PN532: InRelease (0x44) target 0
+    PN532-->>Host: ACK + Response OK
+    end
+
+    rect rgb(50, 50, 50)
+    Note over Host, Card: 4. Continue Polling Other Protocols
+    Host->>PN532: InListPassiveTarget BrTy=0x00 (ISO14443A retry)
+    PN532-->>Host: ACK + 0 targets
+    Host->>PN532: InListPassiveTarget BrTy=0x01 (FeliCa 212)
+    PN532-->>Host: ACK + 0 targets
+    Host->>PN532: InListPassiveTarget BrTy=0x02 (FeliCa 424)
+    PN532-->>Host: ACK + 0 targets
+    Host->>PN532: InListPassiveTarget BrTy=0x03 (ISO14443B)
+    PN532-->>Host: ACK + 0 targets
+    end
+
+    rect rgb(50, 30, 50)
+    Note over Host, Card: 5. Low-Level Protocol Probing
+    Host->>PN532: WriteRegister CIU regs (ISO14443B mode)
+    Host->>PN532: InCommunicateThru (0x42) various probes
+    PN532-->>Host: Timeout (no response)
+    Host->>PN532: WriteRegister CIU regs (ISO15693/NFC-V mode)
+    Host->>PN532: InCommunicateThru (0x42) various probes
+    PN532-->>Host: Timeout (no response)
+    end
+
+    rect rgb(40, 40, 60)
+    Note over Host, PN532: 6. Cleanup & Power Down
+    Host->>PN532: InListPassiveTarget BrTy=0x04 (Jewel/Topaz)
+    PN532-->>Host: ACK + 0 targets
+    Host->>PN532: RFConfiguration (0x32) RF field OFF
+    PN532-->>Host: ACK + Response OK
+    Host->>PN532: InDeselect (0x52) all targets
+    PN532-->>Host: ACK + Response OK
+    Host->>PN532: RFConfiguration (0x32) RF field OFF
+    PN532-->>Host: ACK + Response OK
+    Host->>PN532: PowerDown (0x16) WakeUp=0xF0
+    PN532-->>Host: ACK + Response OK
+    end
+```
+
 ### 1. Initialization Phase
 
 | Step | Command | Description |
