@@ -146,8 +146,9 @@ class PN532:
         return data_payload
 
     def _wakeup(self, logs=None):
-        """Send wakeup preamble to bring PN532 out of sleep."""
-        wakeup_bytes = b"\x55" * 16
+        """Send wakeup preamble to bring PN532 out of HSU sleep."""
+        # PN532 HSU wakeup: 0x55 sync bytes + start code (0x00 0x00 0xFF)
+        wakeup_bytes = b"\x55" * 16 + b"\x00\x00\xff"
         if logs is not None:
             logs.append({
                 "time": self._timestamp(),
@@ -156,16 +157,21 @@ class PN532:
             })
         self._serial.write(wakeup_bytes)
         self._serial.flush()
-        time.sleep(0.01)
+        time.sleep(0.2)
         self._serial.reset_input_buffer()
 
     def _open(self):
-        """Open serial port."""
-        self._serial = serial.Serial(
-            port=self._port,
-            baudrate=self._baudrate,
-            timeout=1.0,
-        )
+        """Open serial port without toggling DTR (which resets PN532)."""
+        self._serial = serial.Serial()
+        self._serial.port = self._port
+        self._serial.baudrate = self._baudrate
+        self._serial.timeout = 1.0
+        self._serial.dsrdtr = False
+        self._serial.rtscts = False
+        self._serial.dtr = False
+        self._serial.open()
+        time.sleep(0.05)
+        self._serial.reset_input_buffer()
 
     def _close(self):
         """Close serial port."""
@@ -175,9 +181,16 @@ class PN532:
 
     # -- Command methods --
 
-    def sam_configuration(self, logs=None):
-        """Configure SAM to normal mode."""
-        return self._send_command(0x14, b"\x01\x00", logs=logs)
+    def sam_configuration(self, logs=None, retries=3):
+        """Configure SAM to normal mode (with retries for post-wakeup timing)."""
+        for attempt in range(retries):
+            resp = self._send_command(0x14, b"\x01\x00", logs=logs)
+            if resp is not None:
+                return resp
+            # Flush stale data and wait before retrying
+            self._serial.reset_input_buffer()
+            time.sleep(0.1)
+        return None
 
     def get_firmware_version(self, logs=None):
         """Get firmware version. Returns (IC, Ver, Rev, Support) or None."""
@@ -387,17 +400,16 @@ class PN532:
 
     # -- Type 4 Tag emulation --
 
-    def emulate_tag(self, ndef_bytes, stop_event, logs):
+    def emulate_tag(self, emulator, stop_event, logs):
         """
-        Emulate an NFC Forum Type 4 Tag.
+        Emulate an NFC tag using the given APDU emulator.
         Runs until stop_event is set or an unrecoverable error occurs.
         Appends log dicts to the ``logs`` deque (thread-safe via caller's lock).
 
-        ndef_bytes: raw NDEF message bytes (without length prefix).
+        emulator: object with handle_apdu(apdu) -> bytes method.
         stop_event: threading.Event signalling when to stop.
         logs: collections.deque to append log entries to.
         """
-        emulator = Type4TagEmulator(ndef_bytes)
 
         # TgInitAsTarget parameters for ISO14443-4 PICC
         mode = 0x05  # PassiveOnly | PICCOnly
@@ -562,3 +574,82 @@ class Type4TagEmulator:
 
         chunk = self._selected_file[offset:offset + le]
         return chunk + bytes([0x90, 0x00])
+
+
+class CustomTagEmulator:
+    """
+    Custom APDU protocol emulator with a flat read/write data buffer.
+
+    Supports SELECT (by custom AID), READ BINARY, and WRITE (INS=0xD0).
+    """
+
+    CUSTOM_AID = bytes([0xF0, 0x01, 0x02, 0x03, 0x04, 0x05])
+    BUFFER_SIZE = 256
+
+    def __init__(self, initial_data=b""):
+        self._buffer = bytearray(self.BUFFER_SIZE)
+        n = min(len(initial_data), self.BUFFER_SIZE)
+        self._buffer[:n] = initial_data[:n]
+        self._selected = False
+
+    def handle_apdu(self, apdu):
+        """Process a C-APDU and return the R-APDU bytes."""
+        if len(apdu) < 4:
+            return bytes([0x6D, 0x00])  # INS not supported
+
+        ins = apdu[1]
+        if ins == 0xA4:   # SELECT
+            return self._handle_select(apdu)
+        elif ins == 0xB0:  # READ BINARY
+            return self._handle_read(apdu)
+        elif ins == 0xD0:  # WRITE (custom)
+            return self._handle_write(apdu)
+        else:
+            return bytes([0x6D, 0x00])  # INS not supported
+
+    def _handle_select(self, apdu):
+        """Handle SELECT command — match custom AID."""
+        if len(apdu) < 5:
+            return bytes([0x6A, 0x82])
+
+        p1 = apdu[2]
+        lc = apdu[4]
+        data = apdu[5:5 + lc]
+
+        if p1 == 0x04 and data == self.CUSTOM_AID:
+            self._selected = True
+            return bytes([0x90, 0x00])
+
+        return bytes([0x6A, 0x82])  # application not found
+
+    def _handle_read(self, apdu):
+        """Handle READ BINARY — P2=offset, Le=length."""
+        if not self._selected:
+            return bytes([0x6A, 0x82])
+
+        offset = apdu[3]
+        le = apdu[4] if len(apdu) > 4 else 0
+
+        if offset >= self.BUFFER_SIZE:
+            return bytes([0x6A, 0x82])
+
+        chunk = bytes(self._buffer[offset:offset + le])
+        return chunk + bytes([0x90, 0x00])
+
+    def _handle_write(self, apdu):
+        """Handle WRITE (INS=0xD0) — P2=offset, data follows."""
+        if not self._selected:
+            return bytes([0x6A, 0x82])
+
+        offset = apdu[3]
+        if len(apdu) < 5:
+            return bytes([0x67, 0x00])  # wrong length
+
+        lc = apdu[4]
+        data = apdu[5:5 + lc]
+
+        if offset + len(data) > self.BUFFER_SIZE:
+            return bytes([0x6A, 0x82])  # out of range
+
+        self._buffer[offset:offset + len(data)] = data
+        return bytes([0x90, 0x00])
