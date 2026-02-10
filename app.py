@@ -49,6 +49,26 @@ def index():
     return render_template('index.html')
 
 
+@app.route('/api/ports')
+def list_ports():
+    """Return available serial ports and the currently active port."""
+    return jsonify({
+        'ports': PN532.list_ports(),
+        'current': pn532_reader._port,
+    })
+
+
+@app.route('/api/ports', methods=['POST'])
+def set_port():
+    """Switch the active serial port."""
+    data = request.get_json()
+    port = data.get('port', '')
+    if not port:
+        return jsonify({'success': False, 'error': 'Port is required'})
+    pn532_reader.set_port(port)
+    return jsonify({'success': True, 'current': pn532_reader._port})
+
+
 @app.route('/api/scan')
 def scan():
     """Scan for NFC cards."""

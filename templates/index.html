@@ -492,6 +492,51 @@
             50% { opacity: 0.5; }
         }
 
+        .device-selector {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+            margin-bottom: 25px;
+        }
+
+        .device-selector select {
+            padding: 8px 14px;
+            background: rgba(0, 0, 0, 0.3);
+            border: 1px solid rgba(255, 255, 255, 0.15);
+            border-radius: 8px;
+            color: #fff;
+            font-size: 0.9rem;
+            font-family: 'Monaco', 'Menlo', monospace;
+            min-width: 260px;
+        }
+
+        .device-selector select:focus {
+            outline: none;
+            border-color: #00d9ff;
+        }
+
+        .device-selector .refresh-btn {
+            padding: 8px 16px;
+            background: rgba(0, 217, 255, 0.15);
+            border: 1px solid rgba(0, 217, 255, 0.3);
+            border-radius: 8px;
+            color: #00d9ff;
+            font-size: 0.85rem;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .device-selector .refresh-btn:hover {
+            background: rgba(0, 217, 255, 0.25);
+            border-color: #00d9ff;
+        }
+
+        .device-selector .port-label {
+            color: #888;
+            font-size: 0.85rem;
+        }
+
         .scanning-animation {
             animation: pulse 1.5s infinite;
         }
@@ -520,6 +565,14 @@
     <div class="container">
         <h1>PN532 NFC Reader</h1>
 
+        <div class="device-selector">
+            <span class="port-label">Device:</span>
+            <select id="portSelect" onchange="switchPort()">
+                <option value="">Detecting...</option>
+            </select>
+            <button class="refresh-btn" onclick="refreshPorts()">Refresh</button>
+        </div>
+
         <div class="tabs">
             <div class="tab active" data-tab="read" onclick="switchTab('read')">Read Card</div>
             <div class="tab" data-tab="emulate" onclick="switchTab('emulate')">Emulate Tag</div>
@@ -544,6 +597,7 @@
                 <div class="log-header">
                     <h3>Communication Log</h3>
                     <div class="log-controls">
+                        <button class="clear-btn" onclick="copyLogs('read')">Copy</button>
                         <button class="clear-btn" onclick="exportLogs('read')">Export CSV</button>
                         <button class="clear-btn" onclick="clearReadLogs()">Clear</button>
                         <span class="log-count" id="readLogCount">0 entries</span>
@@ -603,6 +657,7 @@
                             <input type="checkbox" id="autoScroll" checked>
                             Auto-scroll
                         </label>
+                        <button class="clear-btn" onclick="copyLogs('emulate')">Copy</button>
                         <button class="clear-btn" onclick="exportLogs('emulate')">Export CSV</button>
                         <button class="clear-btn" onclick="clearLogs()">Clear</button>
                         <span class="log-count" id="emulateLogCount">0 entries</span>
@@ -670,6 +725,7 @@
                 <div class="log-header">
                     <h3>Communication Log</h3>
                     <div class="log-controls">
+                        <button class="clear-btn" onclick="copyLogs('vault')">Copy</button>
                         <button class="clear-btn" onclick="exportLogs('vault')">Export CSV</button>
                         <button class="clear-btn" onclick="clearVaultLogs()">Clear</button>
                         <span class="log-count" id="vaultLogCount">0 entries</span>
@@ -720,6 +776,7 @@
                 <div class="log-header">
                     <h3>Communication Log</h3>
                     <div class="log-controls">
+                        <button class="clear-btn" onclick="copyLogs('ndef')">Copy</button>
                         <button class="clear-btn" onclick="exportLogs('ndef')">Export CSV</button>
                         <button class="clear-btn" onclick="clearNdefLogs()">Clear</button>
                         <span class="log-count" id="ndefLogCount">0 entries</span>
@@ -736,6 +793,52 @@
         let isEmulating = false;
         let logPollInterval = null;
         let lastLogCount = 0;
+
+        async function refreshPorts() {
+            const select = document.getElementById('portSelect');
+            try {
+                const response = await fetch('/api/ports');
+                const data = await response.json();
+                const ports = data.ports || [];
+                const current = data.current || '';
+
+                select.innerHTML = '';
+                if (ports.length === 0) {
+                    select.innerHTML = '<option value="">(no device found)</option>';
+                    return;
+                }
+                ports.forEach(p => {
+                    const opt = document.createElement('option');
+                    opt.value = p;
+                    opt.textContent = p.replace('/dev/tty.', '');
+                    if (p === current) opt.selected = true;
+                    select.appendChild(opt);
+                });
+
+                // If server's current port is gone, auto-switch to first available
+                if (!ports.includes(current) && ports.length > 0) {
+                    select.value = ports[0];
+                    await switchPort();
+                }
+            } catch (e) {
+                select.innerHTML = '<option value="">(fetch error)</option>';
+            }
+        }
+
+        async function switchPort() {
+            const select = document.getElementById('portSelect');
+            const port = select.value;
+            if (!port) return;
+            try {
+                await fetch('/api/ports', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ port })
+                });
+            } catch (e) {
+                console.error('Failed to switch port:', e);
+            }
+        }
 
         // PN532 command code map (TX commands, TFI=D4)
         const PN532_COMMANDS = {
@@ -1157,6 +1260,32 @@
             document.getElementById('readLogContent').innerHTML =
                 '<div class="log-empty">Logs cleared</div>';
             document.getElementById('readLogCount').textContent = '0 entries';
+        }
+
+        function copyLogs(type) {
+            const containerId = type === 'read' ? 'readLogContent' : type === 'vault' ? 'vaultLogContent' : type === 'ndef' ? 'ndefLogContent' : 'emulateLogContent';
+            const container = document.getElementById(containerId);
+            const entries = container.querySelectorAll('.log-entry');
+
+            if (entries.length === 0) {
+                alert('No logs to copy');
+                return;
+            }
+
+            let text = '';
+            entries.forEach(entry => {
+                const time = entry.querySelector('.log-time')?.textContent || '';
+                const direction = entry.querySelector('.log-direction')?.textContent || '';
+                const data = entry.getAttribute('data-raw') || '';
+                text += `${time}  ${direction}  ${data}\n`;
+            });
+
+            navigator.clipboard.writeText(text).then(() => {
+                const btn = event.target;
+                const original = btn.textContent;
+                btn.textContent = 'Copied!';
+                setTimeout(() => btn.textContent = original, 1500);
+            });
         }
 
         function exportLogs(type) {
@@ -1691,6 +1820,7 @@
 
         // Auto-scan on page load
         window.addEventListener('load', () => {
+            refreshPorts();
             scanCards();
         });
 

@@ -22,8 +22,19 @@ TFI_PN532_TO_HOST = 0xD5
 
 ACK_FRAME = bytes([0x00, 0x00, 0xFF, 0x00, 0xFF, 0x00])
 
-SERIAL_PORT = "/dev/tty.usbserial-1410"
 BAUDRATE = 115200
+
+
+def _find_serial_port():
+    """Auto-detect the USB-serial port for the PN532."""
+    import glob
+    candidates = glob.glob("/dev/tty.usbserial-*")
+    if candidates:
+        return candidates[0]
+    return "/dev/tty.usbserial-1410"  # fallback
+
+
+SERIAL_PORT = _find_serial_port()
 
 
 @dataclass
@@ -40,11 +51,23 @@ class CardInfo:
 class PN532:
     """PN532 NFC reader via direct UART communication."""
 
+    @staticmethod
+    def list_ports():
+        """Return all available /dev/tty.usbserial-* ports."""
+        import glob
+        return sorted(glob.glob("/dev/tty.usbserial-*"))
+
     def __init__(self, port=SERIAL_PORT, baudrate=BAUDRATE):
         self._port = port
         self._baudrate = baudrate
         self._serial = None
         self._lock = threading.Lock()
+
+    def set_port(self, port):
+        """Close existing connection and switch to a new serial port."""
+        with self._lock:
+            self._close()
+            self._port = port
 
     def _build_frame(self, cmd, params=b""):
         """Build a PN532 normal information frame."""
@@ -146,7 +169,13 @@ class PN532:
         return data_payload
 
     def _wakeup(self, logs=None):
-        """Send wakeup preamble to bring PN532 out of HSU sleep."""
+        """Send wakeup preamble to bring PN532 out of HSU sleep.
+
+        After the sync bytes, a dummy GetFirmwareVersion command is sent
+        because the first real command after HSU wakeup is often ignored
+        by the PN532.  This "sacrificial" command absorbs that quirk so
+        the caller's next command succeeds reliably.
+        """
         # PN532 HSU wakeup: 0x55 sync bytes + start code (0x00 0x00 0xFF)
         wakeup_bytes = b"\x55" * 16 + b"\x00\x00\xff"
         if logs is not None:
@@ -160,8 +189,19 @@ class PN532:
         time.sleep(0.2)
         self._serial.reset_input_buffer()
 
-    def _open(self):
-        """Open serial port without toggling DTR (which resets PN532)."""
+        # Sacrificial command — response may or may not arrive.
+        self._send_command(0x02, logs=logs)
+        self._serial.reset_input_buffer()
+
+    def _ensure_open(self):
+        """Open serial port if not already connected.
+
+        Uses dtr=False to avoid resetting the PN532 on every open.
+        If the PN532 is stuck (no response after wakeup), call
+        _hard_reset() which performs a DTR reset cycle.
+        """
+        if self._serial and self._serial.is_open:
+            return
         self._serial = serial.Serial()
         self._serial.port = self._port
         self._serial.baudrate = self._baudrate
@@ -171,6 +211,24 @@ class PN532:
         self._serial.dtr = False
         self._serial.open()
         time.sleep(0.05)
+        self._serial.reset_input_buffer()
+
+    def _hard_reset(self):
+        """Perform a DTR-based hardware reset of the PN532.
+
+        Close the port, reopen with DTR HIGH to assert RSTPDN, then
+        close and reopen with DTR LOW.  Waits for the PN532 to boot.
+        """
+        self._close()
+        # Open with DTR HIGH to pulse reset
+        s = serial.Serial(self._port, self._baudrate, timeout=1.0)
+        s.dtr = True
+        time.sleep(0.5)
+        s.close()
+        time.sleep(0.1)
+        # Reopen with DTR LOW (normal operation)
+        self._ensure_open()
+        time.sleep(2.0)
         self._serial.reset_input_buffer()
 
     def _close(self):
@@ -191,20 +249,23 @@ class PN532:
             self._serial.reset_input_buffer()
             time.sleep(0.1)
 
-        # All soft retries failed — force DTR hardware reset and try once more
+        # All soft retries failed — perform a DTR hard reset and retry.
         if logs is not None:
             logs.append({
                 "time": self._timestamp(),
                 "direction": "TX",
-                "data": "(DTR reset)",
+                "data": "(hard reset)",
             })
-        self._serial.dtr = True
-        time.sleep(0.1)
-        self._serial.dtr = False
-        time.sleep(0.5)
-        self._serial.reset_input_buffer()
+        self._hard_reset()
         self._wakeup(logs)
-        return self._send_command(0x14, b"\x01\x00", logs=logs)
+
+        for _ in range(retries):
+            resp = self._send_command(0x14, b"\x01\x00", logs=logs)
+            if resp is not None:
+                return resp
+            self._serial.reset_input_buffer()
+            time.sleep(0.1)
+        return None
 
     def get_firmware_version(self, logs=None):
         """Get firmware version. Returns (IC, Ver, Rev, Support) or None."""
@@ -344,7 +405,7 @@ class PN532:
 
         with self._lock:
             try:
-                self._open()
+                self._ensure_open()
 
                 # Wakeup
                 self._wakeup(logs)
@@ -369,6 +430,8 @@ class PN532:
 
                 # RF Configuration — MaxRetries
                 self.rf_configuration(0x05, [0xFF, 0x01, 0x02], logs)
+                # Longer RF timeout for PN532-to-PN532 emulation scenarios
+                self.rf_configuration(0x02, [0x00, 0x0B, 0x0E], logs)  # fRetryTimeout=0x0E (~819ms)
 
                 # InListPassiveTarget — ISO14443A
                 resp = self.in_list_passive_target(brty=0x00, timeout=3.0, logs=logs)
@@ -404,6 +467,7 @@ class PN532:
                 }
 
             except serial.SerialException as e:
+                self._close()
                 return {
                     "success": False,
                     "error": f"Serial port error: {e}",
@@ -417,8 +481,6 @@ class PN532:
                     "cards": [],
                     "logs": logs,
                 }
-            finally:
-                self._close()
 
     # -- Vault protocol reader --
 
@@ -433,7 +495,7 @@ class PN532:
 
         with self._lock:
             try:
-                self._open()
+                self._ensure_open()
                 self._wakeup(logs)
 
                 resp = self.sam_configuration(logs)
@@ -442,6 +504,8 @@ class PN532:
 
                 # MaxRetries
                 self.rf_configuration(0x05, [0xFF, 0x01, 0x02], logs)
+                # Longer RF timeout for PN532-to-PN532 emulation scenarios
+                self.rf_configuration(0x02, [0x00, 0x0B, 0x0E], logs)  # fRetryTimeout=0x0E (~819ms)
 
                 # Detect card
                 resp = self.in_list_passive_target(brty=0x00, timeout=3.0, logs=logs)
@@ -487,11 +551,10 @@ class PN532:
                 }
 
             except serial.SerialException as e:
+                self._close()
                 return {"success": False, "error": f"Serial port error: {e}", "logs": logs}
             except Exception as e:
                 return {"success": False, "error": str(e), "logs": logs}
-            finally:
-                self._close()
 
     def write_vault_tag(self, write_offset, data_bytes):
         """
@@ -504,7 +567,7 @@ class PN532:
 
         with self._lock:
             try:
-                self._open()
+                self._ensure_open()
                 self._wakeup(logs)
 
                 resp = self.sam_configuration(logs)
@@ -512,6 +575,8 @@ class PN532:
                     return {"success": False, "error": "SAMConfiguration failed", "logs": logs}
 
                 self.rf_configuration(0x05, [0xFF, 0x01, 0x02], logs)
+                # Longer RF timeout for PN532-to-PN532 emulation scenarios
+                self.rf_configuration(0x02, [0x00, 0x0B, 0x0E], logs)  # fRetryTimeout=0x0E (~819ms)
 
                 resp = self.in_list_passive_target(brty=0x00, timeout=3.0, logs=logs)
                 card = self._parse_14443a_target(resp)
@@ -554,11 +619,10 @@ class PN532:
                 }
 
             except serial.SerialException as e:
+                self._close()
                 return {"success": False, "error": f"Serial port error: {e}", "logs": logs}
             except Exception as e:
                 return {"success": False, "error": str(e), "logs": logs}
-            finally:
-                self._close()
 
     # -- NDEF Type 4 reader --
 
@@ -570,11 +634,17 @@ class PN532:
         Returns (sw1, sw2, payload) or raises RuntimeError on failure.
         """
         for attempt in range(1 + retries):
+            # Small delay between consecutive APDUs to give emulated cards
+            # (PN532 target) time to loop back from TgSetData to TgGetData.
+            time.sleep(0.02)
             resp = self.in_data_exchange(tg, apdu, timeout=2.0, logs=logs)
             if resp is None or len(resp) < 3:
                 raise RuntimeError("No response from card")
             status = resp[2]
             if status != 0x00:
+                if attempt < retries:
+                    time.sleep(0.05)
+                    continue
                 raise RuntimeError(f"InDataExchange error 0x{status:02x}")
             data = resp[3:]
             # Workaround: PN532 may leak raw ISO-DEP I-block when CID is present.
@@ -605,7 +675,7 @@ class PN532:
 
         with self._lock:
             try:
-                self._open()
+                self._ensure_open()
                 self._wakeup(logs)
 
                 resp = self.sam_configuration(logs)
@@ -613,6 +683,8 @@ class PN532:
                     return {"success": False, "error": "SAMConfiguration failed", "logs": logs}
 
                 self.rf_configuration(0x05, [0xFF, 0x01, 0x02], logs)
+                # Longer RF timeout for PN532-to-PN532 emulation scenarios
+                self.rf_configuration(0x02, [0x00, 0x0B, 0x0E], logs)  # fRetryTimeout=0x0E (~819ms)
 
                 # Detect card
                 resp = self.in_list_passive_target(brty=0x00, timeout=3.0, logs=logs)
@@ -733,11 +805,10 @@ class PN532:
             except RuntimeError as e:
                 return {"success": False, "error": str(e), "card_info": card_info if 'card_info' in dir() else None, "logs": logs}
             except serial.SerialException as e:
+                self._close()
                 return {"success": False, "error": f"Serial port error: {e}", "logs": logs}
             except Exception as e:
                 return {"success": False, "error": str(e), "logs": logs}
-            finally:
-                self._close()
 
     def write_ndef_tag(self, ndef_msg_bytes):
         """
@@ -756,7 +827,7 @@ class PN532:
 
         with self._lock:
             try:
-                self._open()
+                self._ensure_open()
                 self._wakeup(logs)
 
                 resp = self.sam_configuration(logs)
@@ -764,6 +835,8 @@ class PN532:
                     return {"success": False, "error": "SAMConfiguration failed", "logs": logs}
 
                 self.rf_configuration(0x05, [0xFF, 0x01, 0x02], logs)
+                # Longer RF timeout for PN532-to-PN532 emulation scenarios
+                self.rf_configuration(0x02, [0x00, 0x0B, 0x0E], logs)  # fRetryTimeout=0x0E (~819ms)
 
                 resp = self.in_list_passive_target(brty=0x00, timeout=3.0, logs=logs)
                 card = self._parse_14443a_target(resp)
@@ -883,11 +956,10 @@ class PN532:
             except RuntimeError as e:
                 return {"success": False, "error": str(e), "card_info": card_info if 'card_info' in dir() else None, "logs": logs}
             except serial.SerialException as e:
+                self._close()
                 return {"success": False, "error": f"Serial port error: {e}", "logs": logs}
             except Exception as e:
                 return {"success": False, "error": str(e), "logs": logs}
-            finally:
-                self._close()
 
     # -- Type 4 Tag emulation --
 
@@ -918,7 +990,7 @@ class PN532:
 
         with self._lock:
             try:
-                self._open()
+                self._ensure_open()
                 self._wakeup(logs)
                 self.sam_configuration(logs)
                 self.set_parameters(0x24, logs)  # fAutomaticATR_RES | fISO14443-4_PICC
@@ -963,6 +1035,7 @@ class PN532:
                             break
 
             except serial.SerialException as e:
+                self._close()
                 logs.append({
                     "time": self._timestamp(),
                     "direction": "ERR",
@@ -974,8 +1047,6 @@ class PN532:
                     "direction": "ERR",
                     "data": f"Error: {e}",
                 })
-            finally:
-                self._close()
 
 
 class Type4TagEmulator:
