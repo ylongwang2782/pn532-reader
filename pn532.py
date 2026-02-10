@@ -196,9 +196,9 @@ class PN532:
     def _ensure_open(self):
         """Open serial port if not already connected.
 
-        Uses dtr=False to avoid resetting the PN532 on every open.
-        If the PN532 is stuck (no response after wakeup), call
-        _hard_reset() which performs a DTR reset cycle.
+        On fresh open, performs an explicit DTR reset so the PN532
+        always starts in a known state.  Reuses an existing connection
+        if the port is already open.
         """
         if self._serial and self._serial.is_open:
             return
@@ -210,31 +210,33 @@ class PN532:
         self._serial.rtscts = False
         self._serial.dtr = False
         self._serial.open()
-        time.sleep(0.05)
+        # Explicit DTR reset: macOS may briefly pulse DTR during open(),
+        # leaving the PN532 in an undefined state.  A full toggle here
+        # guarantees a clean boot.
+        self._serial.dtr = True   # RSTPDN LOW — assert reset
+        time.sleep(0.1)
+        self._serial.dtr = False  # RSTPDN HIGH — release, PN532 boots
+        time.sleep(1.5)
         self._serial.reset_input_buffer()
 
     def _hard_reset(self):
         """Perform a DTR-based hardware reset of the PN532.
 
-        Close the port, reopen with DTR HIGH to assert RSTPDN, then
-        close and reopen with DTR LOW.  Waits for the PN532 to boot.
+        Toggles DTR on the existing connection to avoid unpredictable
+        DTR state changes caused by close/reopen on macOS.
         """
-        self._close()
-        # Open with DTR HIGH to pulse reset
-        s = serial.Serial(self._port, self._baudrate, timeout=1.0)
-        s.dtr = True
-        time.sleep(0.5)
-        s.close()
-        time.sleep(0.1)
-        # Reopen with DTR LOW (normal operation)
         self._ensure_open()
-        time.sleep(2.0)
+        self._serial.dtr = True   # RSTPDN LOW — assert reset
+        time.sleep(0.5)
+        self._serial.dtr = False  # RSTPDN HIGH — release, PN532 boots
+        time.sleep(3.0)
         self._serial.reset_input_buffer()
 
     def _close(self):
         """Close serial port."""
-        if self._serial and self._serial.is_open:
-            self._serial.close()
+        if self._serial:
+            if self._serial.is_open:
+                self._serial.close()
             self._serial = None
 
     # -- Command methods --

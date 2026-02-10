@@ -1819,8 +1819,8 @@
         }
 
         // Auto-scan on page load
-        window.addEventListener('load', () => {
-            refreshPorts();
+        window.addEventListener('load', async () => {
+            await refreshPorts();
             scanCards();
         });
 
