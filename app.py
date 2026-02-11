@@ -122,6 +122,13 @@ def read_vault():
     return jsonify(result)
 
 
+@app.route('/api/vault-length')
+def vault_length():
+    """Get valid data length from a Vault APDU card."""
+    result = pn532_reader.get_vault_length()
+    return jsonify(result)
+
+
 @app.route('/api/read-ndef')
 def read_ndef():
     """Read NDEF message from a Type 4 Tag."""

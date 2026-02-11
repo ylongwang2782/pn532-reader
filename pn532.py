@@ -514,11 +514,13 @@ class PN532:
     def read_vault_tag(self, read_offset=0, read_length=64):
         """
         Read data from a card implementing the Vault APDU protocol.
-        Selects the Vault AID, then issues READ BINARY.
+        Selects the Vault AID, then issues READ BINARY with 16-bit offset (P1:P2).
+        Automatically chunks reads >250 bytes across multiple APDUs.
         Returns dict with {success, card_info, data_hex, data_text, logs}.
         """
         logs = []
         vault_aid = bytes([0xF0, 0x01, 0x02, 0x03, 0x04, 0x05])
+        max_read_chunk = 32  # PN7160 I2C@100kHz + FWI=4: FWT~4.8ms limits to ~32B/APDU
 
         with self._lock:
             try:
@@ -558,13 +560,25 @@ class PN532:
                     self.power_down(logs)
                     return {"success": False, "error": f"SELECT rejected (SW={sw1:02x}{sw2:02x})", "card_info": card_info, "logs": logs}
 
-                # READ BINARY: 00 B0 00 <offset> <length>
-                read_apdu = bytes([0x00, 0xB0, 0x00, read_offset & 0xFF, read_length & 0xFF])
-                sw1, sw2, payload = self._exchange_apdu(tg, read_apdu, logs)
+                # READ BINARY with 16-bit offset (P1:P2), chunked if needed
+                all_data = b""
+                offset = read_offset
+                remaining = read_length
+                while remaining > 0:
+                    chunk_size = min(remaining, max_read_chunk)
+                    p1 = (offset >> 8) & 0xFF
+                    p2 = offset & 0xFF
+                    read_apdu = bytes([0x00, 0xB0, p1, p2, chunk_size & 0xFF])
+                    sw1, sw2, payload = self._exchange_apdu(tg, read_apdu, logs)
+                    if (sw1, sw2) != (0x90, 0x00):
+                        break
+                    all_data += bytes(payload)
+                    offset += len(payload)
+                    remaining -= len(payload)
 
-                data_hex = self._format_hex(payload)
+                data_hex = self._format_hex(all_data)
                 # Decode as text, replacing non-printable bytes
-                data_text = "".join(chr(b) if 0x20 <= b < 0x7F else "." for b in payload)
+                data_text = "".join(chr(b) if 0x20 <= b < 0x7F else "." for b in all_data)
 
                 self.in_release(logs=logs)
                 self.power_down(logs)
@@ -583,14 +597,84 @@ class PN532:
             except Exception as e:
                 return {"success": False, "error": str(e), "logs": logs}
 
+    def get_vault_length(self):
+        """
+        Query the valid data length from a Vault APDU card.
+        Sends GET DATA LENGTH (CLA=0x80, INS=0xCA).
+        Returns dict with {success, card_info, length, logs}.
+        """
+        logs = []
+        vault_aid = bytes([0xF0, 0x01, 0x02, 0x03, 0x04, 0x05])
+
+        with self._lock:
+            try:
+                self._ensure_open()
+                self._wakeup(logs)
+
+                resp = self.sam_configuration(logs)
+                if resp is None:
+                    return {"success": False, "error": "SAMConfiguration failed", "logs": logs}
+
+                self.rf_configuration(0x05, [0xFF, 0x01, 0xFF], logs)
+                self.rf_configuration(0x02, [0x00, 0x0B, 0x0E], logs)
+
+                resp = self.in_list_passive_target(brty=0x00, timeout=3.0, logs=logs)
+                card = self._parse_14443a_target(resp)
+                if card is None:
+                    self.power_down(logs)
+                    return {"success": False, "error": "No card detected", "logs": logs}
+
+                card_info = {
+                    "uid": card.uid,
+                    "atqa": card.atqa,
+                    "sak": card.sak,
+                    "ats": card.ats if card.ats else None,
+                }
+
+                tg = 0x01
+
+                # SELECT Vault AID
+                select_apdu = bytes([0x00, 0xA4, 0x04, 0x00, len(vault_aid)]) + vault_aid + bytes([0x00])
+                sw1, sw2, _ = self._exchange_apdu(tg, select_apdu, logs)
+                if (sw1, sw2) != (0x90, 0x00):
+                    self.in_release(logs=logs)
+                    self.power_down(logs)
+                    return {"success": False, "error": f"SELECT rejected (SW={sw1:02x}{sw2:02x})", "card_info": card_info, "logs": logs}
+
+                # GET DATA LENGTH: 80 CA 00 00
+                get_len_apdu = bytes([0x80, 0xCA, 0x00, 0x00])
+                sw1, sw2, payload = self._exchange_apdu(tg, get_len_apdu, logs)
+
+                self.in_release(logs=logs)
+                self.power_down(logs)
+
+                if (sw1, sw2) != (0x90, 0x00) or len(payload) < 2:
+                    return {"success": False, "error": f"GET LENGTH failed (SW={sw1:02x}{sw2:02x})", "card_info": card_info, "logs": logs}
+
+                length = (payload[0] << 8) | payload[1]
+                return {
+                    "success": True,
+                    "card_info": card_info,
+                    "length": length,
+                    "logs": logs,
+                }
+
+            except serial.SerialException as e:
+                self._close()
+                return {"success": False, "error": f"Serial port error: {e}", "logs": logs}
+            except Exception as e:
+                return {"success": False, "error": str(e), "logs": logs}
+
     def write_vault_tag(self, write_offset, data_bytes):
         """
         Write data to a card implementing the Vault APDU protocol.
-        Selects the Vault AID, then issues WRITE (INS=0xD0).
+        Selects the Vault AID, then issues WRITE (INS=0xD0) with 16-bit offset (P1:P2).
+        Automatically chunks writes >250 bytes across multiple APDUs.
         Returns dict with {success, card_info, logs}.
         """
         logs = []
         vault_aid = bytes([0xF0, 0x01, 0x02, 0x03, 0x04, 0x05])
+        max_write_chunk = 32  # PN7160 I2C@100kHz + FWI=4: FWT~4.8ms limits to ~32B/APDU
 
         with self._lock:
             try:
@@ -628,15 +712,24 @@ class PN532:
                     self.power_down(logs)
                     return {"success": False, "error": f"SELECT rejected (SW={sw1:02x}{sw2:02x})", "card_info": card_info, "logs": logs}
 
-                # WRITE: 00 D0 00 <offset> <length> <data>
-                write_apdu = bytes([0x00, 0xD0, 0x00, write_offset & 0xFF, len(data_bytes)]) + data_bytes
-                sw1, sw2, _ = self._exchange_apdu(tg, write_apdu, logs)
+                # WRITE with 16-bit offset (P1:P2), chunked if needed
+                offset = write_offset
+                remaining_data = data_bytes
+                while remaining_data:
+                    chunk = remaining_data[:max_write_chunk]
+                    remaining_data = remaining_data[max_write_chunk:]
+                    p1 = (offset >> 8) & 0xFF
+                    p2 = offset & 0xFF
+                    write_apdu = bytes([0x00, 0xD0, p1, p2, len(chunk)]) + chunk
+                    sw1, sw2, _ = self._exchange_apdu(tg, write_apdu, logs)
+                    if (sw1, sw2) != (0x90, 0x00):
+                        self.in_release(logs=logs)
+                        self.power_down(logs)
+                        return {"success": False, "error": f"WRITE failed at offset {offset} (SW={sw1:02x}{sw2:02x})", "card_info": card_info, "logs": logs}
+                    offset += len(chunk)
 
                 self.in_release(logs=logs)
                 self.power_down(logs)
-
-                if (sw1, sw2) != (0x90, 0x00):
-                    return {"success": False, "error": f"WRITE failed (SW={sw1:02x}{sw2:02x})", "card_info": card_info, "logs": logs}
 
                 return {
                     "success": True,
@@ -1174,16 +1267,18 @@ class VaultTagEmulator:
     """
     Vault APDU protocol emulator with a flat read/write data buffer.
 
-    Supports SELECT (by Vault AID), READ BINARY, and WRITE (INS=0xD0).
+    Supports SELECT (by Vault AID), READ BINARY (16-bit offset),
+    WRITE (INS=0xD0, 16-bit offset), and GET DATA LENGTH (80 CA).
     """
 
     VAULT_AID = bytes([0xF0, 0x01, 0x02, 0x03, 0x04, 0x05])
-    BUFFER_SIZE = 256
+    BUFFER_SIZE = 2048
 
     def __init__(self, initial_data=b""):
         self._buffer = bytearray(self.BUFFER_SIZE)
         n = min(len(initial_data), self.BUFFER_SIZE)
         self._buffer[:n] = initial_data[:n]
+        self._valid_len = n
         self._selected = False
 
     def handle_apdu(self, apdu):
@@ -1191,6 +1286,7 @@ class VaultTagEmulator:
         if len(apdu) < 4:
             return bytes([0x6D, 0x00])  # INS not supported
 
+        cla = apdu[0]
         ins = apdu[1]
         if ins == 0xA4:   # SELECT
             return self._handle_select(apdu)
@@ -1198,6 +1294,8 @@ class VaultTagEmulator:
             return self._handle_read(apdu)
         elif ins == 0xD0:  # WRITE (Vault)
             return self._handle_write(apdu)
+        elif cla == 0x80 and ins == 0xCA:  # GET DATA LENGTH
+            return self._handle_get_length()
         else:
             return bytes([0x6D, 0x00])  # INS not supported
 
@@ -1217,11 +1315,11 @@ class VaultTagEmulator:
         return bytes([0x6A, 0x82])  # application not found
 
     def _handle_read(self, apdu):
-        """Handle READ BINARY — P2=offset, Le=length."""
+        """Handle READ BINARY — P1:P2 = 16-bit offset, Le=length."""
         if not self._selected:
             return bytes([0x6A, 0x82])
 
-        offset = apdu[3]
+        offset = (apdu[2] << 8) | apdu[3]
         le = apdu[4] if len(apdu) > 4 else 0
 
         if offset >= self.BUFFER_SIZE:
@@ -1231,11 +1329,11 @@ class VaultTagEmulator:
         return chunk + bytes([0x90, 0x00])
 
     def _handle_write(self, apdu):
-        """Handle WRITE (INS=0xD0) — P2=offset, data follows."""
+        """Handle WRITE (INS=0xD0) — P1:P2 = 16-bit offset, data follows."""
         if not self._selected:
             return bytes([0x6A, 0x82])
 
-        offset = apdu[3]
+        offset = (apdu[2] << 8) | apdu[3]
         if len(apdu) < 5:
             return bytes([0x67, 0x00])  # wrong length
 
@@ -1246,4 +1344,13 @@ class VaultTagEmulator:
             return bytes([0x6A, 0x82])  # out of range
 
         self._buffer[offset:offset + len(data)] = data
+        new_end = offset + len(data)
+        if new_end > self._valid_len:
+            self._valid_len = new_end
         return bytes([0x90, 0x00])
+
+    def _handle_get_length(self):
+        """Handle GET DATA LENGTH (80 CA) — returns 2-byte big-endian valid data length."""
+        if not self._selected:
+            return bytes([0x6A, 0x82])
+        return bytes([(self._valid_len >> 8) & 0xFF, self._valid_len & 0xFF, 0x90, 0x00])
