@@ -1818,10 +1818,9 @@
             document.getElementById('ndefLogCount').textContent = '0 entries';
         }
 
-        // Auto-scan on page load
+        // Refresh ports on page load (no auto-scan)
         window.addEventListener('load', async () => {
             await refreshPorts();
-            scanCards();
         });
 
         // Cleanup on page unload

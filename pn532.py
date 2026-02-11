@@ -198,10 +198,16 @@ class PN532:
 
         On fresh open, performs an explicit DTR reset so the PN532
         always starts in a known state.  Reuses an existing connection
-        if the port is already open.
+        if the port is already open and the underlying device file
+        still exists.
         """
         if self._serial and self._serial.is_open:
-            return
+            # Verify the device file still exists (catches USB unplug/replug)
+            import os
+            if os.path.exists(self._port):
+                return
+            # Device gone — close the stale handle so we can reopen
+            self._close()
         self._serial = serial.Serial()
         self._serial.port = self._port
         self._serial.baudrate = self._baudrate
@@ -259,6 +265,25 @@ class PN532:
                 "data": "(hard reset)",
             })
         self._hard_reset()
+        self._wakeup(logs)
+
+        for _ in range(retries):
+            resp = self._send_command(0x14, b"\x01\x00", logs=logs)
+            if resp is not None:
+                return resp
+            self._serial.reset_input_buffer()
+            time.sleep(0.1)
+
+        # Last resort: close and fully reopen the serial connection.
+        # This recovers from stale file descriptors after USB replug.
+        if logs is not None:
+            logs.append({
+                "time": self._timestamp(),
+                "direction": "TX",
+                "data": "(full reconnect)",
+            })
+        self._close()
+        self._ensure_open()
         self._wakeup(logs)
 
         for _ in range(retries):

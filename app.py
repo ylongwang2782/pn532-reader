@@ -50,6 +50,8 @@ def _device_watchdog():
                 absent_since = time.monotonic()
                 logger.warning("PN532 device not detected, will auto-shutdown in %ds if not reconnected",
                                DEVICE_ABSENT_TIMEOUT)
+                # Close stale serial connection so next operation reopens fresh
+                pn532_reader._close()
             elapsed = time.monotonic() - absent_since
             if elapsed >= DEVICE_ABSENT_TIMEOUT:
                 logger.warning("PN532 device absent for %ds, shutting down server", int(elapsed))
