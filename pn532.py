@@ -431,7 +431,7 @@ class PN532:
                     raw_lines.append(f"Firmware: {device_name}")
 
                 # RF Configuration — MaxRetries
-                self.rf_configuration(0x05, [0xFF, 0x01, 0x02], logs)
+                self.rf_configuration(0x05, [0xFF, 0x01, 0xFF], logs)
                 # Longer RF timeout for PN532-to-PN532 emulation scenarios
                 self.rf_configuration(0x02, [0x00, 0x0B, 0x0E], logs)  # fRetryTimeout=0x0E (~819ms)
 
@@ -505,7 +505,7 @@ class PN532:
                     return {"success": False, "error": "SAMConfiguration failed", "logs": logs}
 
                 # MaxRetries
-                self.rf_configuration(0x05, [0xFF, 0x01, 0x02], logs)
+                self.rf_configuration(0x05, [0xFF, 0x01, 0xFF], logs)
                 # Longer RF timeout for PN532-to-PN532 emulation scenarios
                 self.rf_configuration(0x02, [0x00, 0x0B, 0x0E], logs)  # fRetryTimeout=0x0E (~819ms)
 
@@ -576,7 +576,7 @@ class PN532:
                 if resp is None:
                     return {"success": False, "error": "SAMConfiguration failed", "logs": logs}
 
-                self.rf_configuration(0x05, [0xFF, 0x01, 0x02], logs)
+                self.rf_configuration(0x05, [0xFF, 0x01, 0xFF], logs)
                 # Longer RF timeout for PN532-to-PN532 emulation scenarios
                 self.rf_configuration(0x02, [0x00, 0x0B, 0x0E], logs)  # fRetryTimeout=0x0E (~819ms)
 
@@ -684,7 +684,7 @@ class PN532:
                 if resp is None:
                     return {"success": False, "error": "SAMConfiguration failed", "logs": logs}
 
-                self.rf_configuration(0x05, [0xFF, 0x01, 0x02], logs)
+                self.rf_configuration(0x05, [0xFF, 0x01, 0xFF], logs)
                 # Longer RF timeout for PN532-to-PN532 emulation scenarios
                 self.rf_configuration(0x02, [0x00, 0x0B, 0x0E], logs)  # fRetryTimeout=0x0E (~819ms)
 
@@ -836,7 +836,7 @@ class PN532:
                 if resp is None:
                     return {"success": False, "error": "SAMConfiguration failed", "logs": logs}
 
-                self.rf_configuration(0x05, [0xFF, 0x01, 0x02], logs)
+                self.rf_configuration(0x05, [0xFF, 0x01, 0xFF], logs)
                 # Longer RF timeout for PN532-to-PN532 emulation scenarios
                 self.rf_configuration(0x02, [0x00, 0x0B, 0x0E], logs)  # fRetryTimeout=0x0E (~819ms)
 

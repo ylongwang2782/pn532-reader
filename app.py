@@ -3,7 +3,11 @@
 Web interface for PN532 NFC reader — direct serial communication.
 """
 
+import logging
+import os
+import signal
 import threading
+import time
 from collections import deque
 
 import ndef
@@ -11,6 +15,7 @@ from flask import Flask, render_template, jsonify, request
 from pn532 import PN532, Type4TagEmulator, VaultTagEmulator
 
 app = Flask(__name__)
+logger = logging.getLogger(__name__)
 
 # PN532 direct serial reader
 pn532_reader = PN532()
@@ -20,6 +25,36 @@ emulation_thread = None
 emulation_stop_event = None
 log_buffer = deque(maxlen=500)
 log_lock = threading.Lock()
+
+# Device watchdog: auto-shutdown when PN532 USB device is absent too long
+DEVICE_ABSENT_TIMEOUT = 30  # seconds without device before auto-shutdown
+
+
+def _device_watchdog():
+    """Background thread that monitors for PN532 USB serial device presence.
+
+    If no /dev/tty.usbserial-* device is found for DEVICE_ABSENT_TIMEOUT
+    consecutive seconds, the server shuts itself down to free the port.
+    """
+    absent_since = None
+
+    while True:
+        time.sleep(5)
+        ports = PN532.list_ports()
+        if ports:
+            if absent_since is not None:
+                logger.info("PN532 device reconnected: %s", ports)
+            absent_since = None
+        else:
+            if absent_since is None:
+                absent_since = time.monotonic()
+                logger.warning("PN532 device not detected, will auto-shutdown in %ds if not reconnected",
+                               DEVICE_ABSENT_TIMEOUT)
+            elapsed = time.monotonic() - absent_since
+            if elapsed >= DEVICE_ABSENT_TIMEOUT:
+                logger.warning("PN532 device absent for %ds, shutting down server", int(elapsed))
+                os.kill(os.getpid(), signal.SIGTERM)
+                return
 
 
 def build_ndef_bytes(ndef_type: str, content: str) -> bytes:
@@ -256,4 +291,11 @@ def clear_logs():
 
 
 if __name__ == '__main__':
+    logging.basicConfig(level=logging.INFO,
+                        format='%(asctime)s [%(levelname)s] %(message)s')
+
+    # Start device watchdog before Flask server
+    watchdog = threading.Thread(target=_device_watchdog, daemon=True)
+    watchdog.start()
+
     app.run(host='0.0.0.0', port=5001, debug=True)
