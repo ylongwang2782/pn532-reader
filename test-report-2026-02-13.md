@@ -20,6 +20,21 @@
 
 **Result: 8/8 PASSED ✅**
 
+## Test B: Disconnect/Reconnect (3 rounds)
+
+NFC field disconnect → wait → reconnect → verify data integrity.
+Initial write: 2048B pattern (seed=0x42), verified before first disconnect.
+
+| Round | Action | Result |
+|-------|--------|--------|
+| B1 | Remove PRO2 → wait ~5s → place back → read 2048B | ✅ Data intact |
+| B2 | Remove PRO2 → wait ~5s → place back → read 2048B | ✅ Data intact |
+| B3 | Remove PRO2 → wait ~5s → place back → read 2048B + GET LENGTH | ✅ Data intact, Length=2048 |
+
+**Result: 3/3 PASSED ✅**
+
+**Conclusion:** PN7160 RAM buffer survives NFC field loss. Data persists across disconnect/reconnect cycles as long as the MCU remains powered.
+
 ## Test C: Continuous Stability (10 rounds)
 
 Each round: write 2048B random pattern → read back → byte-level verify.
@@ -89,3 +104,5 @@ Final GET DATA LENGTH: 2048 ✅
 - All boundary protection (offset + length > buffer size) works correctly
 - Firmware returns SW=6A82 for out-of-bounds access
 - PN7160 stable across 10 consecutive full-buffer cycles (20KB written, 20KB read, zero errors)
+- PN7160 RAM buffer survives NFC field disconnect/reconnect (3/3 cycles, data intact)
+- **All three test suites passed: A (8/8), B (3/3), C (10/10)**
