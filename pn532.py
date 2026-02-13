@@ -746,12 +746,16 @@ class PN532:
 
     # -- NDEF Type 4 reader --
 
-    def _exchange_apdu(self, tg, apdu, logs, retries=1):
+    def _exchange_apdu(self, tg, apdu, logs, retries=1, strip_cid=False):
         """
         Send an APDU via InDataExchange.
         Handles ISO-DEP CID framing leak (PN532-to-PN532 workaround)
         and retries on short responses (e.g. HCE routing delay).
         Returns (sw1, sw2, payload) or raises RuntimeError on failure.
+
+        strip_cid: Only enable for known PN532-to-PN532 scenarios where
+        raw ISO-DEP I-blocks with CID leak through. Must NOT be used
+        with PN7160 or other NFC controllers whose ATS TC1 CID bit=0.
         """
         for attempt in range(1 + retries):
             # Small delay between consecutive APDUs to give emulated cards
@@ -770,10 +774,11 @@ class PN532:
             # Workaround: PN532 may leak raw ISO-DEP I-block when CID is present.
             # PCB byte 0x0A/0x0B/0x08/0x09 = I-block with CID bit set (bit 3).
             # Skip PCB + 1 CID byte to extract the actual APDU response.
-            # Require >= 5 bytes so stripping still leaves payload + SW (avoid
-            # false positives when first data byte happens to match PCB pattern,
-            # e.g. GET LENGTH returning 0x08 0x00 = 2048).
-            if len(data) >= 5 and (data[0] & 0xE8) == 0x08:
+            # ONLY enabled for PN532-to-PN532 scenarios (strip_cid=True).
+            # PN7160 and other controllers do NOT leak CID frames; enabling
+            # this causes false positives when payload starts with 0x08-0x0F
+            # or 0x18-0x1F (16/256 = 6.25% collision probability per chunk).
+            if strip_cid and len(data) >= 5 and (data[0] & 0xE8) == 0x08:
                 data = data[2:]  # skip PCB + CID byte
             if len(data) >= 2:
                 sw1, sw2 = data[-2], data[-1]
