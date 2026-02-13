@@ -641,8 +641,8 @@ class PN532:
                     self.power_down(logs)
                     return {"success": False, "error": f"SELECT rejected (SW={sw1:02x}{sw2:02x})", "card_info": card_info, "logs": logs}
 
-                # GET DATA LENGTH: 80 CA 00 00
-                get_len_apdu = bytes([0x80, 0xCA, 0x00, 0x00])
+                # GET DATA LENGTH: 80 CA 00 00 Le=00 (expect up to 256 bytes)
+                get_len_apdu = bytes([0x80, 0xCA, 0x00, 0x00, 0x00])
                 sw1, sw2, payload = self._exchange_apdu(tg, get_len_apdu, logs)
 
                 self.in_release(logs=logs)
@@ -770,7 +770,10 @@ class PN532:
             # Workaround: PN532 may leak raw ISO-DEP I-block when CID is present.
             # PCB byte 0x0A/0x0B/0x08/0x09 = I-block with CID bit set (bit 3).
             # Skip PCB + 1 CID byte to extract the actual APDU response.
-            if len(data) >= 3 and (data[0] & 0xE8) == 0x08:
+            # Require >= 5 bytes so stripping still leaves payload + SW (avoid
+            # false positives when first data byte happens to match PCB pattern,
+            # e.g. GET LENGTH returning 0x08 0x00 = 2048).
+            if len(data) >= 5 and (data[0] & 0xE8) == 0x08:
                 data = data[2:]  # skip PCB + CID byte
             if len(data) >= 2:
                 sw1, sw2 = data[-2], data[-1]
