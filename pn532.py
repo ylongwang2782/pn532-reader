@@ -171,35 +171,51 @@ class PN532:
     def _wakeup(self, logs=None):
         """Send wakeup preamble to bring PN532 out of HSU sleep.
 
-        After the sync bytes, a dummy GetFirmwareVersion command is sent
-        because the first real command after HSU wakeup is often ignored
-        by the PN532.  This "sacrificial" command absorbs that quirk so
-        the caller's next command succeeds reliably.
+        The wakeup sync bytes and the first command (SAMConfiguration)
+        MUST be sent in a single write().  On macOS + CH340, splitting
+        them into separate writes causes the PN532 to drop the first
+        command entirely, resulting in empty responses.
+
+        After the combined wakeup+SAM, a short delay allows the PN532
+        to process and respond.  The response is read and discarded so
+        the caller's next command starts with a clean buffer.
         """
-        # PN532 HSU wakeup: 0x55 sync bytes + start code (0x00 0x00 0xFF)
-        wakeup_bytes = b"\x55" * 16 + b"\x00\x00\xff"
+        # Build SAMConfiguration frame: D4 14 01 00 (normal mode, no timeout)
+        sam_data = bytes([0xD4, 0x14, 0x01, 0x00])
+        sam_len = len(sam_data)
+        sam_lcs = (0x100 - sam_len) & 0xFF
+        sam_dcs = (0x100 - sum(sam_data)) & 0xFF
+        sam_frame = bytes([0x00, 0x00, 0xFF, sam_len, sam_lcs]) + sam_data + bytes([sam_dcs, 0x00])
+
+        # Combine wakeup preamble + SAMConfiguration in one write
+        wakeup_and_sam = b"\x55" * 16 + sam_frame
+
         if logs is not None:
             logs.append({
                 "time": self._timestamp(),
                 "direction": "TX",
-                "data": self._format_hex(wakeup_bytes),
+                "data": self._format_hex(wakeup_and_sam),
             })
-        self._serial.write(wakeup_bytes)
+        self._serial.write(wakeup_and_sam)
         self._serial.flush()
-        time.sleep(0.2)
-        self._serial.reset_input_buffer()
+        time.sleep(1.0)
 
-        # Sacrificial command — response may or may not arrive.
-        self._send_command(0x02, logs=logs)
+        # Read and discard wakeup SAM response (ACK + D5 15)
+        resp = self._serial.read(64)
+        if logs is not None and resp:
+            logs.append({
+                "time": self._timestamp(),
+                "direction": "RX",
+                "data": self._format_hex(resp) + " (wakeup SAM)",
+            })
         self._serial.reset_input_buffer()
 
     def _ensure_open(self):
         """Open serial port if not already connected.
 
-        On fresh open, performs an explicit DTR reset so the PN532
-        always starts in a known state.  Reuses an existing connection
-        if the port is already open and the underlying device file
-        still exists.
+        Opens with DTR/RTS disabled to avoid resetting the PN532.
+        The actual wakeup is handled by _wakeup() which sends the
+        HSU preamble + SAMConfiguration in a single write.
         """
         if self._serial and self._serial.is_open:
             # Verify the device file still exists (catches USB unplug/replug)
@@ -216,13 +232,7 @@ class PN532:
         self._serial.rtscts = False
         self._serial.dtr = False
         self._serial.open()
-        # Explicit DTR reset: macOS may briefly pulse DTR during open(),
-        # leaving the PN532 in an undefined state.  A full toggle here
-        # guarantees a clean boot.
-        self._serial.dtr = True   # RSTPDN LOW — assert reset
-        time.sleep(0.1)
-        self._serial.dtr = False  # RSTPDN HIGH — release, PN532 boots
-        time.sleep(1.5)
+        time.sleep(0.3)
         self._serial.reset_input_buffer()
 
     def _hard_reset(self):
